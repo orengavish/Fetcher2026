@@ -13,6 +13,12 @@ ib:
   ibc_startgateway_bat: "C:\\IBC\\StartGateway.bat"
   ibc_mode: paper
 
+symbols:
+  - MES
+  - MNQ
+  - MYM
+  - M2K
+
 fetcher:
   auto_fetch_enabled: true
   fetch_bid_ask: true
@@ -28,6 +34,34 @@ fetcher:
 
 session:
   timezone: America/Chicago
+
+# Stub sections required by config_loader validation — not used by fetcher
+orders:
+  tp_ticks: 4
+  sl_ticks: 4
+  active_brackets: [4, 4]
+  tick_size: 0.25
+  quantity_per_symbol:
+    MES: 2
+    MNQ: 1
+    MYM: 1
+    M2K: 1
+
+position:
+  stagnation_seconds: 300
+  stagnation_min_move_points: 0.5
+  sl_cooldown_seconds: 30
+
+shutdown:
+  exit_patience_seconds: 30
+  panic_threshold_minutes: 10
+
+decider:
+  replenishment_poll_seconds: 10
+
+broker:
+  command_poll_seconds: 5
+  ib_poll_seconds: 30
 
 paths:
   db: C:\Projects\Galgo2026\june\data\galao.db
