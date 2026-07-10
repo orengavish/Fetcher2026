@@ -1,0 +1,43 @@
+# Fetcher2026 Configuration — fetch-only, no trading sections
+
+ib:
+  live_host: 127.0.0.1
+  live_port: 4002
+  live_client_ids: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120]
+  paper_host: 127.0.0.1
+  paper_port: 4002
+  paper_client_ids: [201, 202, 203, 204, 205, 206, 207, 208, 209, 210]
+  reconnect_interval_seconds: 30
+  connection_timeout: 5
+  fetcher_client_ids: [801, 802, 803, 804]
+  ibc_startgateway_bat: "C:\\IBC\\StartGateway.bat"
+  ibc_mode: paper
+
+fetcher:
+  auto_fetch_enabled: true
+  fetch_bid_ask: true
+  backfill_bid_ask: true
+  backfill_days: 180
+  fetch_on_startup: true
+  symbols_override:
+    - MES
+    - MNQ
+    - MYM
+  trigger_time_ct: "17:30"
+
+session:
+  timezone: America/Chicago
+
+paths:
+  db: C:\Projects\Galgo2026\june\data\galao.db
+  history: data/history
+  logs: logs
+
+google_drive:
+  enabled: false
+  credentials_path: ""
+  history_folder_id: ""
+
+visualizer:
+  host: 127.0.0.1
+  port: 5050
