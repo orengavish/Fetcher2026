@@ -180,12 +180,26 @@ def _ensure_progress_db(cfg):
         """)
 
 
+def _last_working_day() -> date:
+    """Return most recent Mon–Fri before today (skips weekends)."""
+    d = (datetime.now(CT) - timedelta(days=1)).date()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+# All 4 algo symbols — always fetched for last working day regardless of symbols_override.
+_ALGO_SYMBOLS = ["MES", "MNQ", "MYM", "M2K"]
+
+
 def _get_priority_dates(cfg, symbols: list) -> list:
     """
     Return list of (symbol, date) pairs to fetch, priority order:
+      P0. ALGO      — last working day, all 4 symbols (MES/MNQ/MYM/M2K).
+                      CriticalCorallations2026 depends on this for live decisions. Always first.
       P1. CRITICAL  — dates in verified_trades (ANY symbol), missing CSV for each symbol.
-                      All symbols are fetched for each critical date (needed for correlation).
-      P2. RESUME    — partial files in fetch_progress (finished=0, records>0) not covered by P1.
+                      Backtrading priority; all symbols fetched per date for correlation.
+      P2. RESUME    — partial files in fetch_progress (finished=0, records>0) not in P0/P1.
       P3. STANDARD  — backfill last backfill_days trading days, most recent first.
     Only considers BID_ASK as missing if fetch_bid_ask is enabled in config.
     Called repeatedly during the fetch loop so priority stays current.
@@ -204,6 +218,24 @@ def _get_priority_dates(cfg, symbols: list) -> list:
         if do_bid_ask and (sym, d, "bidask") not in present:
             return True
         return False
+
+    # ── P0: ALGO PRIORITY — last working day, all 4 symbols ──────────────────
+    # Must be complete before anything else. CC2026 algo needs fresh tick data.
+    lwd = _last_working_day()
+    lwd_str = lwd.isoformat()
+    p0a = []  # BID_ASK only (TRADES done) — fast path
+    p0b = []  # TRADES missing — full fetch
+    for sym in _ALGO_SYMBOLS:
+        if _is_missing(sym, lwd_str):
+            key = (sym, lwd_str)
+            if key not in seen:
+                seen.add(key)
+                if (sym, lwd_str, "trades") in present:
+                    p0a.append((sym, lwd))
+                else:
+                    p0b.append((sym, lwd))
+    pairs.extend(p0a)
+    pairs.extend(p0b)
 
     # ── P1: CRITICAL — verified trade dates, all symbols ─────────────────────
     # Ordered by verified trade count DESC so high-value dates are fetched first.

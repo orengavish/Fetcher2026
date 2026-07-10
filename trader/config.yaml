@@ -23,6 +23,7 @@ fetcher:
     - MES
     - MNQ
     - MYM
+    - M2K
   trigger_time_ct: "17:30"
 
 session:
