@@ -424,9 +424,8 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-seri
   text-align:left;padding-left:14px;position:sticky;left:0;background:#0d1117;z-index:1}
 .gtab tr:hover td{background:#ffffff04}
 .gtab tr:hover td.dc{background:#0d1117}
-.cd{background:#14532d44;color:#3fb950;border-radius:2px;padding:1px 4px;font-size:.6rem;font-weight:700}
-.cu{background:#14532d1a;color:#6e9e6e;border-radius:2px;padding:1px 4px;font-size:.6rem}
-.ca{background:#c2410c22;color:#f0883e;border-radius:2px;padding:1px 4px;font-size:.6rem;animation:pl 1.1s infinite}
+.cd{background:#14532d55;color:#3fb950;border-radius:2px;padding:1px 5px;font-size:.6rem;font-weight:700}
+.ca{background:#c2410c22;color:#f0883e;border-radius:2px;padding:1px 5px;font-size:.6rem;font-weight:700;animation:pl 1.1s infinite}
 .cm{color:#30363d;font-size:.6rem}
 .tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.57rem;font-weight:700;margin-right:2px}
 .tp0{background:#c2410c33;color:#f0883e}.tp1{background:#92400e33;color:#d29922}
@@ -658,13 +657,9 @@ function buildHead(){
 }
 
 function cellHtml(c){
-  if(!c)return'<span class="cm">—</span>';
-  if(c.s==='active')return`<span class="ca">…${fmtK(c.c)}</span>`;
-  if(c.s==='done'){
-    const cnt=c.c>0?fmtK(c.c):'✓';
-    if(c.v==='pass'||c.v==='warn')return`<span class="cd">${cnt}</span>`;
-    return`<span class="cu">${cnt}</span>`;
-  }
+  if(!c||c.s==='miss')return'<span class="cm">—</span>';
+  if(c.s==='active')return`<span class="ca">▶ ${fmtK(c.c)}</span>`;
+  if(c.s==='done')  return`<span class="cd">✓ ${c.c>0?fmtK(c.c):''}</span>`;
   return'<span class="cm">—</span>';
 }
 
