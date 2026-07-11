@@ -93,27 +93,30 @@ def _vt_counts():
 def _throughput():
     now      = datetime.now(timezone.utc)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    hour_ago = now - timedelta(hours=1)
-    min_ago  = now - timedelta(minutes=1)
-    sec5_ago = now - timedelta(seconds=5)
-    r = {"midnight": 0, "hour": 0, "rate_per_min": 0,
-         "last_ts": None, "data_age": 9999, "active": None, "avg_per_min": 0}
+    r = {"midnight": 0, "files_done": 0, "files_started": 0,
+         "avg_rate": 0, "last_ts": None, "data_age": 9999,
+         "active": None, "avg_per_min": 0}
     try:
         conn = sqlite3.connect(str(PROGRESS_DB), timeout=3)
-        # midnight = all rows (including active job) — running total
+        # ticks today — all rows touched since midnight (includes active job count)
         row = conn.execute(
             "SELECT SUM(records_fetched) FROM fetch_progress WHERE updated_at >= ?",
             (midnight.isoformat(),)
         ).fetchone()
         r["midnight"] = int(row[0] or 0)
-        # hour = only FINISHED jobs completed in last hour (not the running job)
+        # files done today (finished=1, updated since midnight)
         row = conn.execute(
-            "SELECT SUM(records_fetched) FROM fetch_progress "
-            "WHERE finished=1 AND updated_at >= ?",
-            (hour_ago.isoformat(),)
+            "SELECT COUNT(*) FROM fetch_progress WHERE finished=1 AND updated_at >= ?",
+            (midnight.isoformat(),)
         ).fetchone()
-        r["hour"] = int(row[0] or 0)
-        # most recent update across ALL rows
+        r["files_done"] = int(row[0] or 0)
+        # files started today (any row touched since midnight)
+        row = conn.execute(
+            "SELECT COUNT(*) FROM fetch_progress WHERE updated_at >= ?",
+            (midnight.isoformat(),)
+        ).fetchone()
+        r["files_started"] = int(row[0] or 0)
+        # most recent update — drives the LED
         ts_row = conn.execute("SELECT MAX(updated_at) FROM fetch_progress").fetchone()
         if ts_row and ts_row[0]:
             r["last_ts"] = ts_row[0]
@@ -121,28 +124,21 @@ def _throughput():
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             r["data_age"] = max(0, (now - ts).total_seconds())
-        # active row — compute real ticks/min from delta between API calls
+        # active job (most recently updated unfinished row)
         active = conn.execute(
             "SELECT symbol, date, data_type, records_fetched FROM fetch_progress "
-            "WHERE finished=0 ORDER BY updated_at DESC LIMIT 1"
+            "WHERE finished=0 AND records_fetched>0 ORDER BY updated_at DESC LIMIT 1"
         ).fetchone()
         if active:
             sym, dt_, dtype, cnt = active[0], active[1], active[2], int(active[3] or 0)
             r["active"] = {"sym": sym, "date": dt_, "dtype": dtype, "count": cnt}
-            key = (sym, dt_, dtype)
-            if key in _rate_cache:
-                prev_ts, prev_cnt = _rate_cache[key]
-                elapsed = (now - prev_ts).total_seconds()
-                if elapsed >= 2:
-                    delta = max(0, cnt - prev_cnt)
-                    r["rate_per_min"] = int(delta / elapsed * 60)
-            _rate_cache[key] = (now, cnt)
         conn.close()
     except Exception:
         pass
-    # avg ticks/min since midnight (from finished jobs only, excludes current active)
+    # avg ticks/min since midnight — smooth, never volatile
     elapsed_min = max(1, (now - midnight).total_seconds() / 60)
-    r["avg_per_min"] = int(r["midnight"] / elapsed_min)
+    r["avg_rate"]    = int(r["midnight"] / elapsed_min)
+    r["avg_per_min"] = r["avg_rate"]
     return r
 
 def _last_price(sym):
@@ -470,19 +466,19 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-seri
 
     <div class="thr-block">
       <div class="thr-row">
-        <span class="thr-lbl">rate/min</span>
-        <div class="thr-bar"><div class="thr-fill fill-r" id="bar-min" style="width:0%"></div></div>
-        <span class="thr-val val-r" id="val-min">—</span>
+        <span class="thr-lbl">files today</span>
+        <div class="thr-bar"><div class="thr-fill fill-g" id="bar-files" style="width:0%"></div></div>
+        <span class="thr-val val-g" id="val-files">—</span>
       </div>
       <div class="thr-row">
-        <span class="thr-lbl">1 hr done</span>
-        <div class="thr-bar"><div class="thr-fill fill-g" id="bar-hr" style="width:0%"></div></div>
-        <span class="thr-val val-g" id="val-hr">—</span>
-      </div>
-      <div class="thr-row">
-        <span class="thr-lbl">midnight</span>
+        <span class="thr-lbl">ticks today</span>
         <div class="thr-bar"><div class="thr-fill fill-g" id="bar-mid" style="width:0%"></div></div>
         <span class="thr-val val-g" id="val-mid">—</span>
+      </div>
+      <div class="thr-row">
+        <span class="thr-lbl">avg/min</span>
+        <div class="thr-bar"><div class="thr-fill fill-g" id="bar-avg" style="width:0%"></div></div>
+        <span class="thr-val val-g" id="val-avg">—</span>
       </div>
     </div>
 
@@ -570,24 +566,36 @@ async function pollStatus(){
     const led=document.getElementById('big-led');
     led.className='led '+ledClass(age);
 
-    // throughput bars
-    function setBar(barId,valId,val,avg,capV){
-      const pct=Math.min(100,Math.round((val||0)/Math.max(capV,1)*100));
-      const bc=barColor(val,avg), vc=valColor(val,avg);
-      const b=document.getElementById(barId);
-      b.className='thr-fill '+bc;
-      b.style.width=pct+'%';
-      const v=document.getElementById(valId);
-      v.className='thr-val '+vc;
-      v.textContent=fmtK(val);
-    }
-    // rate/min: real delta rate from server, compare to avg ticks/min
-    const rateMin = t.rate_per_min||0;
-    setBar('bar-min','val-min', rateMin, _avgMin, Math.max(_avgMin*2, rateMin, 1));
-    // 1hr done: completed jobs only, compare to avg*60
-    setBar('bar-hr', 'val-hr',  t.hour||0, _avgMin*60, Math.max(_avgMin*60*2, t.hour||0, 1));
-    // midnight: running total, always full bar proportional
-    setBar('bar-mid','val-mid', t.midnight||0, 0, Math.max(t.midnight||0, 1));
+    // bar 1: files done today  (e.g. "3 / 5")
+    const done=t.files_done||0, started=t.files_started||0;
+    const filePct=started>0?Math.min(100,Math.round(done/started*100)):0;
+    const fileCol=done===0?'fill-r':done>=started?'fill-g':'fill-y';
+    const fileVCol=done===0?'val-r':done>=started?'val-g':'val-y';
+    document.getElementById('bar-files').className='thr-fill '+fileCol;
+    document.getElementById('bar-files').style.width=filePct+'%';
+    const fv=document.getElementById('val-files');
+    fv.className='thr-val '+fileVCol;
+    fv.textContent=done+' / '+started;
+
+    // bar 2: ticks today — always grows, always green
+    const mid=t.midnight||0;
+    document.getElementById('bar-mid').className='thr-fill fill-g';
+    document.getElementById('bar-mid').style.width='100%';
+    const mv=document.getElementById('val-mid');
+    mv.className='thr-val val-g';
+    mv.textContent=fmtK(mid);
+
+    // bar 3: avg ticks/min since midnight — smooth, never volatile
+    const avgRate=t.avg_rate||0;
+    _avgMin=avgRate;
+    const avgPct=avgRate>0?Math.min(100,Math.round(avgRate/Math.max(avgRate,1)*100)):0;
+    const avgCol=avgRate===0?'fill-r':avgRate>10000?'fill-g':'fill-y';
+    const avgVCol=avgRate===0?'val-r':avgRate>10000?'val-g':'val-y';
+    document.getElementById('bar-avg').className='thr-fill '+avgCol;
+    document.getElementById('bar-avg').style.width=avgRate>0?'100%':'0%';
+    const av=document.getElementById('val-avg');
+    av.className='thr-val '+avgVCol;
+    av.textContent=avgRate>0?fmtK(avgRate)+'/min':'—';
 
     // last data / age
     document.getElementById('last-ts').textContent=fmtTs(t.last_ts);
@@ -604,13 +612,11 @@ async function pollStatus(){
     const aa=document.getElementById('active-area');
     if(t.active){
       const a=t.active;
-      // typical tick counts: BID_ASK ~2M, TRADES ~8K
-      const expected=a.dtype==='BID_ASK'?2000000:8000;
+      const expected=a.dtype==='BID_ASK'?2000000:10000;
       const pct=a.count>0?Math.min(100,Math.round(a.count/expected*100)):0;
-      const rateStr=t.rate_per_min>0?' · '+fmtK(t.rate_per_min)+'/min':'';
-      aa.innerHTML=`<div class="active-sym">${a.sym} <span style="color:#6e7681;font-size:.72rem">${a.date}</span> <span style="color:#4d5566;font-size:.66rem">${a.dtype}</span>${rateStr?`<span style="color:#3fb950;font-size:.64rem;margin-left:6px">${rateStr}</span>`:''}</div>
+      aa.innerHTML=`<div class="active-sym">${a.sym} <span style="color:#6e7681;font-size:.72rem">${a.date}</span> <span style="color:#4d5566;font-size:.66rem">${a.dtype}</span></div>
 <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
-<div class="active-meta"><span>${fmtK(a.count)} ticks</span><span style="color:#4d5566">${pct}%</span></div>`;
+<div class="active-meta"><span>${fmtK(a.count)} ticks</span><span style="color:#4d5566">${pct>=100?'~done':pct+'%'}</span></div>`;
     } else {
       aa.innerHTML='<span class="no-active">—</span>';
     }
