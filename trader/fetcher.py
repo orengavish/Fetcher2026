@@ -55,7 +55,7 @@ UTC = ZoneInfo("UTC")
 
 _TICK_TIMEOUT  = 45   # seconds per reqHistoricalTicks call
 _TICKS_PER_REQ = 1000
-_PROGRESS_LOG_INTERVAL = 15  # seconds between telemetry lines
+_PROGRESS_LOG_INTERVAL = 5   # seconds between telemetry lines (must be < dashboard poll of 10s)
 _N_WORKERS     = 4    # parallel async windows (reduced from 8 to avoid IB pacing cascade)
 
 _EXCHANGE_MAP = {"MES": "CME", "MNQ": "CME", "M2K": "CME", "MYM": "CBOT"}
