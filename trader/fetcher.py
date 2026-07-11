@@ -192,18 +192,17 @@ def _is_actively_running(conn, symbol, date_str, dtype, grace_seconds=120) -> bo
         return False
 
 
-def _mark_started(conn, symbol, date_str, dtype):
-    # On RESUME (row already exists with records > 0) keep the existing record count
-    # so progress display doesn't reset to 0. Only reset records on a fresh start.
+def _mark_started(conn, symbol, date_str, dtype, resume: bool = False):
+    # resume=True  → keep existing records_fetched (CSV partial, continuing from last tick)
+    # resume=False → reset to 0 (fresh start or CSV missing — stale count would mislead dashboard)
     conn.execute("""
         INSERT INTO fetch_progress (symbol, date, data_type, records_fetched, finished, updated_at)
         VALUES (?,?,?,0,0,?)
         ON CONFLICT(symbol,date,data_type) DO UPDATE
         SET finished=0,
-            records_fetched=CASE WHEN excluded.records_fetched=0 AND records_fetched>0
-                                 THEN records_fetched ELSE 0 END,
+            records_fetched=CASE WHEN ? AND records_fetched>0 THEN records_fetched ELSE 0 END,
             updated_at=excluded.updated_at
-    """, (symbol, date_str, dtype, datetime.now(timezone.utc).isoformat()))
+    """, (symbol, date_str, dtype, datetime.now(timezone.utc).isoformat(), resume))
     conn.commit()
 
 
@@ -396,8 +395,10 @@ def paginate_ticks(ib: IB, contract, start_utc: datetime, end_utc: datetime,
     loop = asyncio.get_event_loop()
     reporter = loop.create_task(_reporter())
 
+    all_windows_done = True
     for ws, we, wi in windows:
         if not _running:
+            all_windows_done = False
             break
         w_count = loop.run_until_complete(
             _paginate_window_async(ib, contract, ws, we, what, wi, progress, write_row)
@@ -420,7 +421,7 @@ def paginate_ticks(ib: IB, contract, start_utc: datetime, end_utc: datetime,
 
     elapsed_fetch = time.time() - t0
     log.info(f"{symbol} {what} | {date_str} | {total:,} ticks in {elapsed_fetch:.1f}s")
-    return total
+    return total, all_windows_done
 
 
 # ── Fetch one day ─────────────────────────────────────────────────────────────
@@ -483,7 +484,7 @@ def fetch_day(ib: IB, symbol: str, target_date: date,
 
         fetch_start = resume_from + timedelta(milliseconds=1) if resume_from else start_utc
 
-        _mark_started(progress_conn, symbol, date_str, dtype)
+        _mark_started(progress_conn, symbol, date_str, dtype, resume=resume_from is not None)
         start_ct = fetch_start.astimezone(CT).strftime("%H:%M CT")
         end_ct   = end_utc.astimezone(CT).strftime("%H:%M CT")
         mode = "RESUME" if resume_from else "START"
@@ -497,6 +498,7 @@ def fetch_day(ib: IB, symbol: str, target_date: date,
             headers = ["time_ct", "time_utc", "bid_p", "bid_s", "ask_p", "ask_s", "symbol"]
 
         open_mode = "a" if resume_from else "w"
+        count, completed = 0, False
         with open(file_path, open_mode, newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             if not resume_from:
@@ -514,14 +516,21 @@ def fetch_day(ib: IB, symbol: str, target_date: date,
                                 bid_p, bid_s, ask_p, ask_s,
                                 contract.localSymbol])
 
-            count = paginate_ticks(ib, contract, fetch_start, end_utc,
-                                   dtype, write_row, progress_conn, symbol, date_str)
+            count, completed = paginate_ticks(ib, contract, fetch_start, end_utc,
+                                              dtype, write_row, progress_conn, symbol, date_str)
 
-        if _running:
+        # Mark finished based on whether ALL windows ran — NOT on _running.
+        # _running can be False even after a clean completion (SIGINT between last
+        # window and this line), and hard kills set no flag at all.
+        if completed:
             _mark_finished(progress_conn, symbol, date_str, dtype, count)
             print(f"  [DONE] {symbol} {dtype} {date_str}: {count:,} ticks -> {file_path.name}",
                   flush=True)
             log.info(f"[DONE] {symbol} {dtype} {date_str}: {count:,} ticks -> {file_path.name}")
+        else:
+            _update_progress(progress_conn, symbol, date_str, dtype, count)
+            log.warning(f"[INTERRUPTED] {symbol} {dtype} {date_str}: {count:,} ticks saved, "
+                        f"will resume on next run")
         results[dtype] = count
 
     return results
@@ -706,8 +715,8 @@ def self_test() -> bool:
                         t_c = t_u.astimezone(CT)
                         w.writerow([t_c.isoformat(), t_u.isoformat(),
                                     price, size, contract.localSymbol])
-                    count = paginate_ticks(ib, contract, start_u2, end_u2,
-                                          "TRADES", _wr, conn2, "MES", "2026-04-07")
+                    count, _ = paginate_ticks(ib, contract, start_u2, end_u2,
+                                             "TRADES", _wr, conn2, "MES", "2026-04-07")
 
                 log.info(f"[self-test] sample fetch: {count} ticks in first 5 min")
                 conn2.close()

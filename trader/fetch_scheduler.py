@@ -188,6 +188,63 @@ def _last_working_day() -> date:
     return d
 
 
+def _reconcile_progress(cfg):
+    """
+    Startup heal: find rows stuck at finished=0 where the CSV already covers
+    the full session. Marks them finished=1 so they don't pollute the queue
+    or the dashboard.
+
+    Root cause this fixes: hard kills (taskkill, Task Scheduler timeout,
+    system shutdown) leave finished=0 even after all ticks were written,
+    because the process never reaches _mark_finished.
+    """
+    import sqlite3 as _sq3
+    from trader.fetcher import get_session_bounds, _get_csv_last_ts
+    from pathlib import Path as P
+    history_dir = P(cfg.paths.history)
+    pdb = P(cfg.paths.db).parent / "fetch_progress.db"
+    _ensure_progress_db(cfg)
+    healed = 0
+    try:
+        with _sq3.connect(str(pdb), timeout=10) as conn:
+            rows = conn.execute(
+                "SELECT symbol, date, data_type, records_fetched FROM fetch_progress "
+                "WHERE finished=0 AND records_fetched > 0"
+            ).fetchall()
+        for sym, d_str, dtype, cnt in rows:
+            suffix = "trades" if dtype == "TRADES" else "bidask"
+            d = date.fromisoformat(d_str)
+            csv_path = history_dir / f"{sym}_{suffix}_{d.strftime('%Y%m%d')}.csv"
+            if not csv_path.exists() or csv_path.stat().st_size < 500:
+                continue
+            # Check if CSV reaches the end of the session window
+            _, end_utc = get_session_bounds(d)
+            last_ts = _get_csv_last_ts(csv_path, dtype)
+            if last_ts is None:
+                continue
+            # Allow 15 min slack — IB sometimes stops a minute before close
+            if last_ts >= end_utc - timedelta(minutes=15):
+                with _sq3.connect(str(pdb), timeout=10) as conn:
+                    conn.execute(
+                        "UPDATE fetch_progress SET finished=1, updated_at=? "
+                        "WHERE symbol=? AND date=? AND data_type=? AND finished=0",
+                        (datetime.now(timezone.utc).isoformat(), sym, d_str, dtype)
+                    )
+                log.info("[reconcile] healed %s %s %s — CSV ends %s, session ends %s",
+                         sym, d_str, dtype,
+                         last_ts.strftime("%H:%M UTC"), end_utc.strftime("%H:%M UTC"))
+                healed += 1
+            else:
+                log.debug("[reconcile] %s %s %s — CSV ends %s (session %s) — partial, leave",
+                          sym, d_str, dtype,
+                          last_ts.strftime("%H:%M UTC"), end_utc.strftime("%H:%M UTC"))
+    except Exception as e:
+        log.warning("[reconcile] error: %s", e)
+    if healed:
+        log.info("[reconcile] healed %d zombie rows", healed)
+    return healed
+
+
 # All 4 algo symbols — always fetched for last working day regardless of symbols_override.
 _ALGO_SYMBOLS = ["MES", "MNQ", "MYM", "M2K"]
 
@@ -339,6 +396,7 @@ def run(specific_date: date = None, backfill: bool = False,
     gdrive     = GDriveClient(cfg)
 
     log.info("=== fetch_scheduler start | symbols=%s bid_ask=%s ===", symbols, do_bid_ask)
+    _reconcile_progress(cfg)   # heal zombie rows from previous hard kills
 
     # ── Determine what to fetch ──
     if specific_date:
