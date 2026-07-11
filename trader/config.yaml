@@ -65,8 +65,8 @@ broker:
 
 paths:
   db: C:\Projects\Galgo2026\june\data\galao.db
-  history: data/history
-  logs: logs
+  history: C:\Projects\Galgo2026\june\trader\data\history
+  logs: C:\Projects\Fetcher2026\logs
 
 google_drive:
   enabled: false
