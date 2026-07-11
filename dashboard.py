@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""
-dashboard.py — Fetcher2026 single-page dashboard
-  python dashboard.py --real    # live mode (port 5050)
-  python dashboard.py           # exits immediately if not --real
-"""
+"""dashboard.py — Fetcher2026  python dashboard.py --real"""
 
-import argparse, csv, socket, sqlite3, sys, threading, time
+import csv, socket, sqlite3, sys, time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,10 +11,8 @@ sys.path.insert(0, str(_ROOT)) if str(_ROOT) not in sys.path else None
 
 import psutil
 from flask import Flask, jsonify
-
-# ── Config & paths ────────────────────────────────────────────────────────────
-
 from lib.config_loader import get_config
+
 _cfg        = get_config()
 HISTORY_DIR = Path(_cfg.paths.history)
 GALAO_DB    = Path(_cfg.paths.db)
@@ -27,19 +21,20 @@ PROGRESS_DB = GALAO_DB.parent / "fetch_progress.db"
 SYMBOLS  = ["MES", "MNQ", "MYM", "M2K"]
 DTYPES   = ["TRADES", "BID_ASK"]
 CT       = ZoneInfo("America/Chicago")
-FETCHER2026_ROOT = str(_ROOT).replace("\\", "/").lower()
+F2_ROOT  = str(_ROOT).replace("\\", "/").lower()
+VERSION  = "v2.1"
 
 app = Flask(__name__)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-def _last_working_day() -> date:
+def _last_working_day():
     d = (datetime.now(CT) - timedelta(days=1)).date()
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
 
-def _working_days_back(n: int) -> list:
+def _working_days_back(n):
     days, d = [], (datetime.now(CT) - timedelta(days=1)).date()
     while len(days) < n:
         if d.weekday() < 5:
@@ -47,33 +42,29 @@ def _working_days_back(n: int) -> list:
         d -= timedelta(days=1)
     return days
 
-def _csv_key(sym: str, dtype: str, d: date) -> str:
+def _csv_exists(sym, dtype, d):
     dt = "trades" if dtype == "TRADES" else "bidask"
-    return f"{sym}_{dt}_{d.strftime('%Y%m%d')}.csv"
-
-def _csv_exists(sym: str, dtype: str, d: date) -> bool:
-    p = HISTORY_DIR / _csv_key(sym, dtype, d)
+    p  = HISTORY_DIR / f"{sym}_{dt}_{d.strftime('%Y%m%d')}.csv"
     return p.exists() and p.stat().st_size > 500
 
-def _gw_up() -> bool:
+def _gw_up():
     try:
         s = socket.create_connection(("127.0.0.1", 4002), timeout=1.5)
         s.close(); return True
     except OSError:
         return False
 
-def _fetcher_pid() -> int | None:
+def _fetcher_pid():
     for p in psutil.process_iter(["pid", "cmdline"]):
         try:
             cmd = " ".join(p.info.get("cmdline") or [])
-            if "fetch_scheduler" in cmd and FETCHER2026_ROOT in cmd.replace("\\", "/").lower():
+            if "fetch_scheduler" in cmd and F2_ROOT in cmd.replace("\\", "/").lower():
                 return p.info["pid"]
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except Exception:
             pass
     return None
 
-def _load_progress() -> dict:
-    """Return dict (sym, date_str, dtype) -> row dict."""
+def _load_progress():
     out = {}
     try:
         conn = sqlite3.connect(str(PROGRESS_DB), timeout=3)
@@ -85,8 +76,7 @@ def _load_progress() -> dict:
         pass
     return out
 
-def _vt_counts() -> dict:
-    """Return {date_str: count} from verified_trades."""
+def _vt_counts():
     try:
         conn = sqlite3.connect(str(GALAO_DB), timeout=3)
         conn.row_factory = sqlite3.Row
@@ -98,38 +88,51 @@ def _vt_counts() -> dict:
     except Exception:
         return {}
 
-def _throughput() -> dict:
+def _throughput():
     now      = datetime.now(timezone.utc)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     hour_ago = now - timedelta(hours=1)
     min_ago  = now - timedelta(minutes=1)
-    result   = {"midnight": 0, "hour": 0, "minute": 0, "last_ts": None, "active": None}
+    sec5_ago = now - timedelta(seconds=5)
+    r = {"midnight": 0, "hour": 0, "minute": 0, "sec5": 0,
+         "last_ts": None, "data_age": 9999, "active": None}
     try:
         conn = sqlite3.connect(str(PROGRESS_DB), timeout=3)
         def _sum(since):
-            r = conn.execute(
+            row = conn.execute(
                 "SELECT SUM(records_fetched) FROM fetch_progress WHERE updated_at >= ?",
                 (since.isoformat(),)
             ).fetchone()
-            return int(r[0] or 0)
-        result["midnight"] = _sum(midnight)
-        result["hour"]     = _sum(hour_ago)
-        result["minute"]   = _sum(min_ago)
-        row = conn.execute(
-            "SELECT symbol, date, data_type, records_fetched, updated_at "
-            "FROM fetch_progress WHERE finished=0 ORDER BY updated_at DESC LIMIT 1"
+            return int(row[0] or 0)
+        r["midnight"] = _sum(midnight)
+        r["hour"]     = _sum(hour_ago)
+        r["minute"]   = _sum(min_ago)
+        r["sec5"]     = _sum(sec5_ago)
+        # most recent update across ALL rows
+        ts_row = conn.execute("SELECT MAX(updated_at) FROM fetch_progress").fetchone()
+        if ts_row and ts_row[0]:
+            r["last_ts"] = ts_row[0]
+            ts = datetime.fromisoformat(ts_row[0].replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            r["data_age"] = max(0, (now - ts).total_seconds())
+        # active row
+        active = conn.execute(
+            "SELECT symbol, date, data_type, records_fetched FROM fetch_progress "
+            "WHERE finished=0 ORDER BY updated_at DESC LIMIT 1"
         ).fetchone()
-        if row:
-            result["last_ts"] = row[4]
-            result["active"]  = {
-                "sym": row[0], "date": row[1], "dtype": row[2], "count": row[3]
-            }
+        if active:
+            r["active"] = {"sym": active[0], "date": active[1],
+                           "dtype": active[2], "count": int(active[3] or 0)}
         conn.close()
     except Exception:
         pass
-    return result
+    # avg ticks/min since midnight
+    elapsed_min = max(1, (now - midnight).total_seconds() / 60)
+    r["avg_per_min"] = int(r["midnight"] / elapsed_min)
+    return r
 
-def _last_price(sym: str) -> float | None:
+def _last_price(sym):
     files = sorted(HISTORY_DIR.glob(f"{sym}_trades_*.csv"), reverse=True)
     for f in files[:3]:
         try:
@@ -145,28 +148,23 @@ def _last_price(sym: str) -> float | None:
             pass
     return None
 
-_start_ts = time.time()
-_last_fail_ts = [0.0]  # mutable so we can update from health check
+def _build_queue(progress, vt):
+    seen, queue = set(), []
+    lwd = _last_working_day()
 
-def _build_queue(progress: dict, vt: dict) -> list:
-    """Build priority-ordered fetch queue."""
-    seen = set()
-    queue = []
-
-    def _is_done(sym, d, dtype):
-        key = (sym, d.isoformat(), dtype)
-        row = progress.get(key)
-        return _csv_exists(sym, dtype, d) or (row and row.get("finished"))
+    def _done(sym, d, dtype):
+        row = progress.get((sym, d.isoformat(), dtype))
+        return _csv_exists(sym, dtype, d) or bool(row and row.get("finished"))
 
     def _status(sym, d, dtype):
-        key = (sym, d.isoformat(), dtype)
-        row = progress.get(key)
-        if _is_done(sym, d, dtype):
+        if _done(sym, d, dtype):
             return "done"
+        row = progress.get((sym, d.isoformat(), dtype))
         if row and not row.get("finished") and row.get("records_fetched", 0) > 0:
-            # active if updated within 90s
             try:
                 ts = datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
                 if (datetime.now(timezone.utc) - ts).total_seconds() < 90:
                     return "active"
             except Exception:
@@ -183,96 +181,76 @@ def _build_queue(progress: dict, vt: dict) -> list:
         queue.append({
             "tier": tier,
             "date": d.isoformat(),
-            "date_label": d.strftime("%-m/%-d") if sys.platform != "win32" else f"{d.month}/{d.day}",
+            "date_label": f"{d.month}/{d.day}",
             "sym": sym,
-            "dtype": dtype,
+            "dtype": "TR" if dtype == "TRADES" else "BA",
             "reason": reason,
             "status": st,
         })
 
-    lwd = _last_working_day()
-
-    # P0: last working day, all 4 symbols
+    # P0
     for sym in SYMBOLS:
         for dtype in DTYPES:
             _add(sym, lwd, dtype, "P0", "last day")
-
-    # P1: verified trade dates ordered by count desc
-    vt_dates = sorted(vt.items(), key=lambda x: -x[1])
-    for d_str, n in vt_dates:
+    # P1
+    for d_str, n in sorted(vt.items(), key=lambda x: -x[1]):
         try:
             d = date.fromisoformat(d_str)
         except Exception:
             continue
         if d == lwd:
-            continue  # already in P0
+            continue
         for sym in SYMBOLS:
             for dtype in DTYPES:
-                _add(sym, d, dtype, "P1", f"{n} vt")
-
-    # P2: partial files (resume)
+                _add(sym, d, dtype, "P1", f"{n}vt")
+    # P2
     for (sym, d_str, dtype), row in progress.items():
         if not row.get("finished") and row.get("records_fetched", 0) > 0:
             try:
-                d = date.fromisoformat(d_str)
+                _add(sym, date.fromisoformat(d_str), dtype, "P2", "resume")
             except Exception:
-                continue
-            _add(sym, d, dtype, "P2", "resume")
-
-    # P3: backfill last 90 working days
+                pass
+    # P3
+    vt_dates = set(vt.keys())
     for d in _working_days_back(90):
-        if d == lwd:
-            continue
-        if any(d.isoformat() == ds for ds, _ in vt_dates):
+        if d == lwd or d.isoformat() in vt_dates:
             continue
         for sym in SYMBOLS:
             for dtype in DTYPES:
                 _add(sym, d, dtype, "P3", "backfill")
-
     return queue
 
-# ── API endpoints ─────────────────────────────────────────────────────────────
+# ── API ───────────────────────────────────────────────────────────────────────
 
 @app.route("/api/status")
 def api_status():
-    gw  = _gw_up()
-    pid = _fetcher_pid()
     thr = _throughput()
     now = time.time()
-    clean_min = int((now - _last_fail_ts[0]) / 60) if not _last_fail_ts[0] else int((now - _start_ts) / 60)
     return jsonify({
-        "gateway": gw,
-        "fetcher_pid": pid,
-        "clean_minutes": clean_min,
-        "throughput": thr,
+        "gateway":     _gw_up(),
+        "fetcher_pid": _fetcher_pid(),
+        "throughput":  thr,
         "ts": datetime.now(timezone.utc).isoformat(),
     })
 
 @app.route("/api/queue")
 def api_queue():
-    progress = _load_progress()
-    vt       = _vt_counts()
-    queue    = _build_queue(progress, vt)
-    return jsonify(queue)
+    return jsonify(_build_queue(_load_progress(), _vt_counts()))
 
 @app.route("/api/files")
 def api_files():
     progress = _load_progress()
     vt       = _vt_counts()
     lwd      = _last_working_day()
-
-    # Collect all relevant dates
     all_dates = set()
-    for (_, d_str, _) in progress.keys():
+    for (_, d_str, _) in progress:
         all_dates.add(d_str)
     for f in HISTORY_DIR.glob("*_trades_????????.csv"):
         parts = f.stem.split("_")
         if len(parts) >= 3:
             dc = parts[-1]
-            try:
+            if len(dc) == 8:
                 all_dates.add(f"{dc[:4]}-{dc[4:6]}-{dc[6:]}")
-            except Exception:
-                pass
     for d_str in vt:
         all_dates.add(d_str)
 
@@ -285,30 +263,26 @@ def api_files():
         cells = {}
         for sym in SYMBOLS:
             for dtype in DTYPES:
-                key = (sym, d_str, dtype)
-                row = progress.get(key)
-                exists = _csv_exists(sym, dtype, d)
-                if exists or (row and row.get("finished")):
-                    vs = row.get("verify_status") if row else None
-                    cells[f"{sym}_{dtype}"] = {"status": "done", "verify": vs, "count": row.get("records_fetched", 0) if row else 0}
+                row = progress.get((sym, d_str, dtype))
+                ex  = _csv_exists(sym, dtype, d)
+                if ex or (row and row.get("finished")):
+                    cnt = int(row["records_fetched"]) if row and row.get("records_fetched") else 0
+                    vs  = row.get("verify_status") if row else None
+                    cells[f"{sym}_{dtype}"] = {"s": "done", "c": cnt, "v": vs}
                 elif row and not row.get("finished") and row.get("records_fetched", 0) > 0:
-                    cells[f"{sym}_{dtype}"] = {"status": "active", "count": row.get("records_fetched", 0)}
+                    cells[f"{sym}_{dtype}"] = {"s": "active", "c": int(row["records_fetched"])}
                 else:
-                    cells[f"{sym}_{dtype}"] = {"status": "missing", "count": 0}
+                    cells[f"{sym}_{dtype}"] = {"s": "miss", "c": 0}
 
         tags = []
-        if d == lwd:
-            tags.append("LAST DAY")
-        if d_str in vt:
-            tags.append(f"VT {vt[d_str]}")
-
+        if d == lwd:       tags.append(("P0", "LAST DAY"))
+        if d_str in vt:    tags.append(("P1", f"VT {vt[d_str]}"))
         rows.append({"date": d_str, "cells": cells, "tags": tags})
-
     return jsonify(rows)
 
 @app.route("/api/prices")
 def api_prices():
-    return jsonify({sym: _last_price(sym) for sym in SYMBOLS})
+    return jsonify({s: _last_price(s) for s in SYMBOLS})
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
@@ -320,262 +294,353 @@ _HTML = r"""<!DOCTYPE html>
 <title>Fetcher2026</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh;font-size:13px}
-a{color:inherit;text-decoration:none}
+html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;
+  background:#0d1117;color:#c9d1d9;font-size:13px}
 
-/* ── header ── */
-.hdr{display:flex;align-items:center;gap:12px;padding:8px 16px;border-bottom:1px solid #21262d;flex-wrap:wrap}
-.hdr h1{font-size:.75rem;font-weight:700;color:#6e7681;letter-spacing:.12em;margin-right:4px}
-.dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:3px;vertical-align:middle}
-.dot-g{background:#3fb950}.dot-r{background:#f85149}.dot-y{background:#d29922}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.dot-a{background:#f0883e;animation:pulse 1.2s infinite}
-.pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:.68rem;font-weight:600}
-.pill-g{background:#14532d22;color:#3fb950;border:1px solid #23863633}
-.pill-r{background:#3d100022;color:#f85149;border:1px solid #7d1c1c44}
-.pill-y{background:#3d2f0022;color:#d29922;border:1px solid #7d5c1044}
-.hdr-time{margin-left:auto;font-size:.65rem;color:#4d5566;font-family:monospace}
+/* ── two-column layout ── */
+.layout{display:flex;height:100vh;overflow:hidden}
 
-/* ── section ── */
-.sec{padding:8px 16px;border-bottom:1px solid #161b22}
-.sec-title{font-size:.62rem;font-weight:700;color:#4d5566;letter-spacing:.1em;margin-bottom:6px;text-transform:uppercase}
+/* ── LEFT PANEL ── */
+.left{width:270px;min-width:220px;flex-shrink:0;border-right:1px solid #21262d;
+  display:flex;flex-direction:column;overflow:hidden;background:#080d13}
 
-/* ── metrics row ── */
-.metrics{display:flex;gap:20px;flex-wrap:wrap;align-items:center}
-.metric{display:flex;flex-direction:column;gap:1px}
-.metric-val{font-size:1.1rem;font-weight:700;color:#e6edf3;font-family:monospace}
-.metric-lbl{font-size:.59rem;color:#4d5566;text-transform:uppercase;letter-spacing:.06em}
-.metric-sub{font-size:.62rem;color:#6e7681;font-family:monospace}
+.brand{padding:14px 14px 8px;border-bottom:1px solid #21262d}
+.brand-name{font-size:1.5rem;font-weight:900;color:#e6edf3;letter-spacing:.06em;line-height:1.1}
+.brand-ver{font-size:1.1rem;font-weight:700;color:#3fb950;margin-top:2px;letter-spacing:.05em}
+.brand-sub{font-size:.6rem;color:#4d5566;margin-top:3px;letter-spacing:.1em;text-transform:uppercase}
 
-/* ── prices ── */
-.prices{display:flex;gap:20px;flex-wrap:wrap;align-items:baseline}
-.sym-price{display:flex;flex-direction:column;gap:1px;min-width:70px}
-.sym-name{font-size:.59rem;color:#6e7681;font-weight:700;letter-spacing:.08em}
-.sym-val{font-size:.95rem;font-weight:700;color:#e6edf3;font-family:monospace}
+.queue-title{padding:6px 14px 4px;font-size:.6rem;font-weight:700;color:#4d5566;
+  letter-spacing:.1em;text-transform:uppercase;border-bottom:1px solid #21262d}
+.queue-scroll{flex:1;overflow-y:auto}
+.queue-scroll::-webkit-scrollbar{width:3px}
+.queue-scroll::-webkit-scrollbar-thumb{background:#21262d;border-radius:2px}
 
-/* ── active fetch ── */
-.active-card{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:10px 14px;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
-.active-info{display:flex;flex-direction:column;gap:3px;min-width:140px}
-.active-sym{font-size:.9rem;font-weight:700;color:#e6edf3}
-.active-detail{font-size:.65rem;color:#6e7681}
-.pbar-wrap{flex:1;min-width:160px}
-.pbar{background:#0d1117;border-radius:4px;height:7px;overflow:hidden;border:1px solid #21262d;margin-bottom:4px}
-.pbar-fill{height:100%;background:linear-gradient(90deg,#c2410c,#f0883e);border-radius:4px;transition:width .8s ease}
-.pbar-meta{font-size:.63rem;color:#6e7681;font-family:monospace;display:flex;justify-content:space-between}
-.active-none{color:#4d5566;font-size:.75rem;font-style:italic}
-
-/* ── queue ── */
-.queue-wrap{max-height:260px;overflow-y:auto}
-.queue-wrap::-webkit-scrollbar{width:4px}
-.queue-wrap::-webkit-scrollbar-track{background:#0d1117}
-.queue-wrap::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px}
-.qtable{width:100%;border-collapse:collapse}
-.qtable th{font-size:.59rem;color:#4d5566;letter-spacing:.07em;text-transform:uppercase;padding:3px 6px;border-bottom:1px solid #21262d;text-align:left;position:sticky;top:0;background:#0d1117;z-index:1}
-.qtable td{padding:3px 6px;border-bottom:1px solid #0d111766;vertical-align:middle;white-space:nowrap}
-.qtable tr:hover td{background:#ffffff04}
-.tier{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.6rem;font-weight:700;min-width:24px;text-align:center}
-.t0{background:#c2410c33;color:#f0883e;border:1px solid #c2410c55}
+.qtab{width:100%;border-collapse:collapse}
+.qtab td{padding:3px 6px 3px 14px;border-bottom:1px solid #0d111755;vertical-align:middle;
+  white-space:nowrap;font-size:.68rem}
+.qtab tr:hover td{background:#ffffff05}
+.tr-done td{opacity:.28}
+.tier{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.59rem;
+  font-weight:800;min-width:22px;text-align:center}
+.t0{background:#c2410c44;color:#f0883e;border:1px solid #c2410c66}
 .t1{background:#92400e33;color:#d29922;border:1px solid #92400e55}
-.t2{background:#1e3a5f33;color:#60a5fa;border:1px solid #1e40af55}
+.t2{background:#1e3a5f44;color:#60a5fa;border:1px solid #1e40af66}
 .t3{background:#21262d;color:#4d5566;border:1px solid #30363d}
-.sts{font-size:.6rem;font-weight:600;padding:1px 5px;border-radius:3px}
-.sts-active{color:#f0883e;animation:pulse 1.2s infinite}
-.sts-done{color:#3fb95066}
-.sts-resume{color:#60a5fa}
-.sts-pending{color:#4d5566}
-.q-date{font-family:monospace;color:#8b949e;font-size:.72rem}
-.q-sym{font-weight:700;color:#c9d1d9;font-size:.72rem}
-.q-dtype{font-size:.62rem;color:#6e7681}
-.q-reason{font-size:.65rem}
-.tr-done td{opacity:.35}
+.q-date{color:#8b949e;font-family:monospace;font-size:.68rem}
+.q-sym{font-weight:700;color:#c9d1d9;font-size:.7rem;width:32px;display:inline-block}
+.q-dt{font-size:.6rem;color:#6e7681;width:18px;display:inline-block}
+.q-rsn{font-size:.64rem;margin-left:2px}
+.rsn-p0{color:#f0883e}.rsn-p1{color:#d29922}.rsn-p2{color:#60a5fa}.rsn-p3{color:#4d5566}
+.sts-a{color:#f0883e;font-weight:700;font-size:.6rem;animation:pl 1.1s infinite}
+.sts-r{color:#60a5fa;font-size:.6rem}.sts-p{color:#30363d;font-size:.6rem}.sts-d{color:#23863633;font-size:.6rem}
+@keyframes pl{0%,100%{opacity:1}50%{opacity:.3}}
 
-/* ── files grid ── */
-.grid-wrap{overflow-x:auto;max-height:340px;overflow-y:auto}
-.grid-wrap::-webkit-scrollbar{width:4px;height:4px}
-.grid-wrap::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px}
-.gtable{border-collapse:collapse;font-size:.67rem;white-space:nowrap}
-.gtable th{padding:4px 5px;text-align:center;font-weight:600;color:#6e7681;border-bottom:2px solid #21262d;position:sticky;top:0;background:#0d1117;z-index:1}
-.gtable th.date-h{text-align:left;min-width:70px;padding-left:0}
-.gtable th.sym-h{border-left:1px solid #21262d;font-size:.7rem;color:#c9d1d9}
-.gtable td{padding:2px 4px;border-bottom:1px solid #0d1117;vertical-align:middle}
-.gtable td.date-c{font-family:monospace;color:#6e7681;font-size:.65rem;padding-left:0;position:sticky;left:0;background:#0d1117;z-index:1}
-.gtable tr:hover td{background:#ffffff04}
-.gtable tr:hover td.date-c{background:#0d1117}
-.cell-done-v{background:#14532d44;color:#3fb950;border-radius:3px;padding:1px 4px;font-size:.58rem;font-weight:700}
-.cell-done-u{background:#14532d22;color:#6e9e6e;border-radius:3px;padding:1px 4px;font-size:.58rem}
-.cell-act{background:#c2410c22;color:#f0883e;border-radius:3px;padding:1px 4px;font-size:.58rem;animation:pulse 1.2s infinite}
-.cell-miss{background:#21262d;color:#4d5566;border-radius:3px;padding:1px 4px;font-size:.58rem}
+/* ── RIGHT PANEL ── */
+.right{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+
+/* health bar */
+.hbar{display:flex;align-items:center;gap:10px;padding:6px 14px;
+  border-bottom:1px solid #21262d;flex-wrap:wrap;flex-shrink:0}
+.hpill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
+  font-size:.67rem;font-weight:600}
+.hp-g{background:#14532d22;color:#3fb950;border:1px solid #23863633}
+.hp-r{background:#3d100022;color:#f85149;border:1px solid #7d1c1c44}
+.hp-y{background:#3d2f0022;color:#d29922;border:1px solid #7d5c1044}
+.hdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.hbar-time{margin-left:auto;font-size:.62rem;color:#4d5566;font-family:monospace}
+
+/* LED + throughput row */
+.led-row{display:flex;align-items:center;gap:14px;padding:10px 14px;
+  border-bottom:1px solid #21262d;flex-shrink:0;flex-wrap:wrap}
+
+.led{width:58px;height:58px;border-radius:50%;flex-shrink:0;transition:all .4s}
+.led-g{background:radial-gradient(circle at 35% 35%,#5bea6e,#22863a);
+  box-shadow:0 0 22px #3fb95099,0 0 44px #3fb95044;animation:lglow 1.4s ease-in-out infinite}
+.led-y{background:radial-gradient(circle at 35% 35%,#fbbf24,#b45309);
+  box-shadow:0 0 18px #d2992255}
+.led-o{background:radial-gradient(circle at 35% 35%,#fb923c,#c2410c);
+  box-shadow:0 0 18px #f0883e44}
+.led-r{background:radial-gradient(circle at 35% 35%,#f87171,#991b1b);
+  box-shadow:0 0 18px #f8514944}
+@keyframes lglow{0%,100%{box-shadow:0 0 22px #3fb95099,0 0 44px #3fb95044}
+  50%{box-shadow:0 0 36px #3fb950cc,0 0 64px #3fb95077}}
+
+.thr-block{display:flex;flex-direction:column;gap:5px;min-width:160px}
+.thr-row{display:flex;align-items:center;gap:7px}
+.thr-lbl{font-size:.59rem;color:#4d5566;width:44px;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.thr-bar{height:8px;border-radius:4px;background:#161b22;flex:1;overflow:hidden;position:relative;min-width:80px}
+.thr-fill{height:100%;border-radius:4px;transition:width .8s ease}
+.fill-g{background:linear-gradient(90deg,#14532d,#238636)}
+.fill-y{background:linear-gradient(90deg,#3d2f00,#d29922)}
+.fill-r{background:linear-gradient(90deg,#3d1010,#f85149)}
+.thr-val{font-size:.68rem;font-weight:700;font-family:monospace;width:56px;text-align:right;flex-shrink:0}
+.val-g{color:#3fb950}.val-y{color:#d29922}.val-r{color:#f85149}
+
+.active-block{flex:1;min-width:180px}
+.active-hdr{font-size:.59rem;color:#4d5566;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
+.active-sym{font-size:.95rem;font-weight:700;color:#e6edf3}
+.active-detail{font-size:.64rem;color:#6e7681;margin-bottom:4px}
+.pbar{height:7px;border-radius:4px;background:#161b22;overflow:hidden;border:1px solid #21262d;margin-bottom:3px}
+.pbar-fill{height:100%;background:linear-gradient(90deg,#c2410c,#f0883e);border-radius:4px;transition:width .8s}
+.active-meta{font-size:.62rem;color:#6e7681;font-family:monospace;display:flex;justify-content:space-between}
+.no-active{font-size:.72rem;color:#30363d;font-style:italic}
+
+.last-ts-block{display:flex;flex-direction:column;gap:3px;flex-shrink:0}
+.last-ts-lbl{font-size:.59rem;color:#4d5566;text-transform:uppercase;letter-spacing:.06em}
+.last-ts-val{font-size:.72rem;color:#8b949e;font-family:monospace}
+.age-val{font-size:.65rem;font-family:monospace}
+.age-g{color:#3fb950}.age-y{color:#d29922}.age-r{color:#f85149}
+
+/* prices */
+.prices{display:flex;gap:18px;padding:7px 14px;border-bottom:1px solid #21262d;
+  flex-shrink:0;flex-wrap:wrap;align-items:baseline}
+.sp{display:flex;flex-direction:column;gap:1px}
+.sp-name{font-size:.58rem;color:#6e7681;font-weight:700;letter-spacing:.08em}
+.sp-val{font-size:.88rem;font-weight:700;color:#e6edf3;font-family:monospace}
+
+/* files grid */
+.grid-outer{flex:1;overflow:hidden;display:flex;flex-direction:column;padding:0 0 0 0}
+.grid-title{padding:5px 14px 3px;font-size:.6rem;font-weight:700;color:#4d5566;
+  letter-spacing:.1em;text-transform:uppercase;flex-shrink:0}
+.grid-scroll{flex:1;overflow:auto}
+.grid-scroll::-webkit-scrollbar{width:4px;height:4px}
+.grid-scroll::-webkit-scrollbar-thumb{background:#21262d;border-radius:2px}
+.gtab{border-collapse:collapse;font-size:.65rem;white-space:nowrap;min-width:100%}
+.gtab th{padding:4px 4px;text-align:center;font-weight:600;color:#6e7681;
+  border-bottom:2px solid #21262d;position:sticky;top:0;background:#0d1117;z-index:2}
+.gtab th.dh{text-align:left;min-width:78px;padding-left:14px;color:#8b949e}
+.gtab th.sh{border-left:1px solid #21262d;color:#c9d1d9;font-size:.68rem}
+.gtab td{padding:2px 3px;border-bottom:1px solid #0d1117;text-align:center;vertical-align:middle}
+.gtab td.dc{font-family:monospace;color:#6e7681;font-size:.64rem;
+  text-align:left;padding-left:14px;position:sticky;left:0;background:#0d1117;z-index:1}
+.gtab tr:hover td{background:#ffffff04}
+.gtab tr:hover td.dc{background:#0d1117}
+.cd{background:#14532d44;color:#3fb950;border-radius:2px;padding:1px 4px;font-size:.6rem;font-weight:700}
+.cu{background:#14532d1a;color:#6e9e6e;border-radius:2px;padding:1px 4px;font-size:.6rem}
+.ca{background:#c2410c22;color:#f0883e;border-radius:2px;padding:1px 4px;font-size:.6rem;animation:pl 1.1s infinite}
+.cm{color:#30363d;font-size:.6rem}
 .tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:.57rem;font-weight:700;margin-right:2px}
-.tag-ld{background:#c2410c33;color:#f0883e}
-.tag-vt{background:#92400e33;color:#d29922}
+.tp0{background:#c2410c33;color:#f0883e}.tp1{background:#92400e33;color:#d29922}
 </style>
 </head>
 <body>
+<div class="layout">
 
-<!-- header -->
-<div class="hdr">
-  <h1>FETCHER2026</h1>
-  <span id="pill-gw" class="pill pill-r"><span class="dot dot-r" id="dot-gw"></span>Gateway</span>
-  <span id="pill-ft" class="pill pill-r"><span class="dot dot-r" id="dot-ft"></span>Fetcher</span>
-  <span class="pill pill-g"><span class="dot dot-g"></span>Dashboard</span>
-  <span id="clean-lbl" style="font-size:.65rem;color:#4d5566"></span>
-  <span class="hdr-time" id="hdr-time">—</span>
-</div>
-
-<!-- prices -->
-<div class="sec">
-  <div class="sec-title">Prices</div>
-  <div class="prices" id="prices-row">
-    <div class="sym-price"><span class="sym-name">MES</span><span class="sym-val" id="p-MES">—</span></div>
-    <div class="sym-price"><span class="sym-name">MNQ</span><span class="sym-val" id="p-MNQ">—</span></div>
-    <div class="sym-price"><span class="sym-name">MYM</span><span class="sym-val" id="p-MYM">—</span></div>
-    <div class="sym-price"><span class="sym-name">M2K</span><span class="sym-val" id="p-M2K">—</span></div>
+<!-- ══ LEFT: brand + queue ══ -->
+<div class="left">
+  <div class="brand">
+    <div class="brand-name">FETCHER<br>2026</div>
+    <div class="brand-ver" id="ver-lbl">""" + VERSION + r"""</div>
+    <div class="brand-sub">Tick Data Service</div>
+  </div>
+  <div class="queue-title">Priority Queue</div>
+  <div class="queue-scroll">
+    <table class="qtab"><tbody id="qbody"></tbody></table>
   </div>
 </div>
 
-<!-- throughput + active -->
-<div class="sec">
-  <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
-    <div>
-      <div class="sec-title">Throughput</div>
-      <div class="metrics">
-        <div class="metric"><span class="metric-val" id="thr-mid">—</span><span class="metric-lbl">Since midnight</span></div>
-        <div class="metric"><span class="metric-val" id="thr-hr">—</span><span class="metric-lbl">Last hour</span></div>
-        <div class="metric"><span class="metric-val" id="thr-min">—</span><span class="metric-lbl">Last minute</span></div>
-        <div class="metric"><span class="metric-val" id="thr-ts" style="font-size:.75rem">—</span><span class="metric-lbl">Last data</span></div>
+<!-- ══ RIGHT ══ -->
+<div class="right">
+
+  <!-- health bar -->
+  <div class="hbar">
+    <span id="hp-gw" class="hpill hp-r"><span class="hdot"></span>Gateway</span>
+    <span id="hp-ft" class="hpill hp-r"><span class="hdot"></span>Fetcher</span>
+    <span class="hpill hp-g"><span class="hdot"></span>Dashboard</span>
+    <span id="clean-lbl" style="font-size:.62rem;color:#4d5566;margin-left:4px"></span>
+    <span class="hbar-time" id="hbar-time"></span>
+  </div>
+
+  <!-- LED + throughput + active -->
+  <div class="led-row">
+    <div class="led led-r" id="big-led" title="Green=fetching now, Red=stalled"></div>
+
+    <div class="thr-block">
+      <div class="thr-row">
+        <span class="thr-lbl">1 min</span>
+        <div class="thr-bar"><div class="thr-fill fill-r" id="bar-min" style="width:0%"></div></div>
+        <span class="thr-val val-r" id="val-min">—</span>
+      </div>
+      <div class="thr-row">
+        <span class="thr-lbl">1 hr</span>
+        <div class="thr-bar"><div class="thr-fill fill-g" id="bar-hr" style="width:0%"></div></div>
+        <span class="thr-val val-g" id="val-hr">—</span>
+      </div>
+      <div class="thr-row">
+        <span class="thr-lbl">midnight</span>
+        <div class="thr-bar"><div class="thr-fill fill-g" id="bar-mid" style="width:0%"></div></div>
+        <span class="thr-val val-g" id="val-mid">—</span>
       </div>
     </div>
-    <div style="flex:1;min-width:220px">
-      <div class="sec-title">Active Fetch</div>
-      <div id="active-card" class="active-card">
-        <span class="active-none">No active fetch</span>
-      </div>
+
+    <div class="active-block">
+      <div class="active-hdr">Active Fetch</div>
+      <div id="active-area"><span class="no-active">—</span></div>
+    </div>
+
+    <div class="last-ts-block">
+      <span class="last-ts-lbl">Last data</span>
+      <span class="last-ts-val" id="last-ts">—</span>
+      <span class="age-val age-r" id="age-lbl">—</span>
     </div>
   </div>
-</div>
 
-<!-- priority queue -->
-<div class="sec">
-  <div class="sec-title">Priority Queue</div>
-  <div class="queue-wrap">
-    <table class="qtable">
-      <thead><tr>
-        <th>Tier</th><th>Date</th><th>Sym</th><th>Type</th><th>Reason</th><th>Status</th>
-      </tr></thead>
-      <tbody id="queue-body"></tbody>
-    </table>
+  <!-- prices -->
+  <div class="prices">
+    <div class="sp"><span class="sp-name">MES</span><span class="sp-val" id="p-MES">—</span></div>
+    <div class="sp"><span class="sp-name">MNQ</span><span class="sp-val" id="p-MNQ">—</span></div>
+    <div class="sp"><span class="sp-name">MYM</span><span class="sp-val" id="p-MYM">—</span></div>
+    <div class="sp"><span class="sp-name">M2K</span><span class="sp-val" id="p-M2K">—</span></div>
   </div>
-</div>
 
-<!-- files grid -->
-<div class="sec" style="border-bottom:none">
-  <div class="sec-title">Fetched Files</div>
-  <div class="grid-wrap">
-    <table class="gtable">
-      <thead id="grid-head"></thead>
-      <tbody id="grid-body"></tbody>
-    </table>
+  <!-- files grid -->
+  <div class="grid-outer">
+    <div class="grid-title">Fetched Files</div>
+    <div class="grid-scroll">
+      <table class="gtab">
+        <thead id="ghead"></thead>
+        <tbody id="gbody"></tbody>
+      </table>
+    </div>
   </div>
-</div>
+
+</div><!-- /right -->
+</div><!-- /layout -->
 
 <script>
 const SYMS=['MES','MNQ','MYM','M2K'], DTS=['TRADES','BID_ASK'];
+let _avgMin=0;
 
 function fmtK(n){
-  if(n==null||n===undefined)return'—';
+  if(n==null)return'—';
   if(n>=1e6)return(n/1e6).toFixed(1)+'M';
   if(n>=1e3)return(n/1e3).toFixed(1)+'K';
   return String(Math.round(n));
 }
-
 function fmtTs(ts){
   if(!ts)return'—';
-  try{
-    const d=new Date(ts);
-    return d.toLocaleTimeString('en-US',{timeZone:'America/Chicago',hour:'2-digit',minute:'2-digit',second:'2-digit'})+" CT";
-  }catch{return ts.slice(11,19)+' UTC';}
+  try{return new Date(ts).toLocaleTimeString('en-US',
+    {timeZone:'America/Chicago',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' CT';}
+  catch{return ts.slice(11,19)+' UTC';}
+}
+function ledClass(age){
+  if(age<6)  return'led-g';
+  if(age<60) return'led-y';
+  if(age<300)return'led-o';
+  return'led-r';
+}
+function barColor(val,avg){
+  if(val===0)return'fill-r';
+  if(avg>0&&val<avg*0.6)return'fill-y';
+  return'fill-g';
+}
+function valColor(val,avg){
+  if(val===0)return'val-r';
+  if(avg>0&&val<avg*0.6)return'val-y';
+  return'val-g';
 }
 
-// ── Status ──
 async function pollStatus(){
   try{
     const d=await(await fetch('/api/status')).json();
-    // gateway
-    const gwUp=d.gateway;
-    document.getElementById('pill-gw').className='pill '+(gwUp?'pill-g':'pill-r');
-    document.getElementById('dot-gw').className='dot '+(gwUp?'dot-g':'dot-r');
-    // fetcher
-    const ftUp=!!d.fetcher_pid;
-    document.getElementById('pill-ft').className='pill '+(ftUp?'pill-g':'pill-r');
-    document.getElementById('dot-ft').className='dot '+(ftUp?'dot-g':'dot-r');
-    // clean uptime
-    document.getElementById('clean-lbl').textContent=
-      'Clean: '+(d.clean_minutes>=60?Math.floor(d.clean_minutes/60)+'h '+(d.clean_minutes%60)+'m':d.clean_minutes+'m');
-    document.getElementById('hdr-time').textContent=new Date().toLocaleTimeString();
-    // throughput
+    // health
+    const gw=d.gateway, ft=!!d.fetcher_pid;
+    document.getElementById('hp-gw').className='hpill '+(gw?'hp-g':'hp-r');
+    document.getElementById('hp-ft').className='hpill '+(ft?'hp-g':'hp-r');
+    document.getElementById('hbar-time').textContent=new Date().toLocaleTimeString();
+
     const t=d.throughput||{};
-    document.getElementById('thr-mid').textContent=fmtK(t.midnight);
-    document.getElementById('thr-hr').textContent=fmtK(t.hour);
-    document.getElementById('thr-min').textContent=fmtK(t.minute);
-    document.getElementById('thr-ts').textContent=fmtTs(t.last_ts);
+    const age=t.data_age??9999;
+    _avgMin=t.avg_per_min||0;
+
+    // big LED
+    const led=document.getElementById('big-led');
+    led.className='led '+ledClass(age);
+
+    // throughput bars — min capped at 2x avg for bar width
+    const cap=Math.max(_avgMin*2,t.minute||0,1);
+    function setBar(barId,valId,val,avg,capV){
+      const pct=Math.min(100,Math.round((val||0)/capV*100));
+      const bc=barColor(val,avg), vc=valColor(val,avg);
+      const b=document.getElementById(barId);
+      b.className='thr-fill '+bc;
+      b.style.width=pct+'%';
+      const v=document.getElementById(valId);
+      v.className='thr-val '+vc;
+      v.textContent=fmtK(val);
+    }
+    setBar('bar-min','val-min',t.minute,_avgMin,Math.max(cap,1));
+    setBar('bar-hr', 'val-hr', t.hour,  _avgMin*60, Math.max(t.hour||0,1));
+    setBar('bar-mid','val-mid',t.midnight,0,Math.max(t.midnight||0,1));
+
+    // last data / age
+    document.getElementById('last-ts').textContent=fmtTs(t.last_ts);
+    const ageEl=document.getElementById('age-lbl');
+    if(age<9999){
+      const as=Math.round(age);
+      ageEl.textContent=as<60?as+'s ago':Math.floor(as/60)+'m ago';
+      ageEl.className='age-val '+(age<10?'age-g':age<120?'age-y':'age-r');
+    } else {
+      ageEl.textContent='no data'; ageEl.className='age-val age-r';
+    }
+
     // active fetch
-    const ac=document.getElementById('active-card');
+    const aa=document.getElementById('active-area');
     if(t.active){
       const a=t.active;
-      ac.innerHTML=`
-        <div class="active-info">
-          <div class="active-sym">${a.sym} <span style="color:#6e7681;font-size:.75rem">${a.date}</span></div>
-          <div class="active-detail">${a.dtype}</div>
-        </div>
-        <div class="pbar-wrap">
-          <div class="pbar"><div class="pbar-fill" style="width:${Math.min(100,Math.round(a.count/(a.target||62000)*100))}%"></div></div>
-          <div class="pbar-meta"><span>${fmtK(a.count)} ticks</span></div>
-        </div>`;
+      const pct=a.count>0?Math.min(100,Math.round(a.count/62000*100)):0;
+      aa.innerHTML=`<div class="active-sym">${a.sym} <span style="color:#6e7681;font-size:.72rem">${a.date}</span> <span style="color:#4d5566;font-size:.66rem">${a.dtype}</span></div>
+<div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
+<div class="active-meta"><span>${fmtK(a.count)} ticks</span><span style="color:#4d5566">${pct}%</span></div>`;
     } else {
-      ac.innerHTML='<span class="active-none">No active fetch</span>';
+      aa.innerHTML='<span class="no-active">—</span>';
     }
-  }catch(e){console.error('status',e)}
+  }catch(e){console.error(e)}
 }
 
-// ── Queue ──
-const TIER_CLS=['t0','t1','t2','t3'];
-const STS_CLS={active:'sts-active',done:'sts-done',resume:'sts-resume',pending:'sts-pending'};
-
+// ── queue ──
 async function pollQueue(){
   try{
     const items=await(await fetch('/api/queue')).json();
-    const tbody=document.getElementById('queue-body');
-    tbody.innerHTML=items.map(r=>`
-      <tr class="${r.status==='done'?'tr-done':''}">
-        <td><span class="tier ${TIER_CLS[parseInt(r.tier[1])||3]}">${r.tier}</span></td>
+    const TCLS=['t0','t1','t2','t3'];
+    const RCLS=['rsn-p0','rsn-p1','rsn-p2','rsn-p3'];
+    const tbody=document.getElementById('qbody');
+    tbody.innerHTML=items.map(r=>{
+      const ti=parseInt(r.tier[1])||0;
+      const sc=r.status==='active'?'sts-a':r.status==='resume'?'sts-r':
+               r.status==='done'?'sts-d':'sts-p';
+      const si=r.status==='active'?'▶':r.status==='done'?'✓':
+               r.status==='resume'?'↺':'·';
+      return`<tr class="${r.status==='done'?'tr-done':''}">
+        <td><span class="tier ${TCLS[ti]}">${r.tier}</span></td>
         <td class="q-date">${r.date_label}</td>
-        <td class="q-sym">${r.sym}</td>
-        <td class="q-dtype">${r.dtype==='BID_ASK'?'BA':'TR'}</td>
-        <td class="q-reason" style="color:${r.tier==='P0'?'#f0883e':r.tier==='P1'?'#d29922':r.tier==='P2'?'#60a5fa':'#4d5566'}">${r.reason}</td>
-        <td><span class="sts ${STS_CLS[r.status]||'sts-pending'}">${r.status.toUpperCase()}</span></td>
-      </tr>`).join('');
-  }catch(e){console.error('queue',e)}
+        <td><span class="q-sym">${r.sym}</span><span class="q-dt">${r.dtype}</span></td>
+        <td class="q-rsn ${RCLS[ti]}">${r.reason}</td>
+        <td><span class="${sc}">${si}</span></td>
+      </tr>`;
+    }).join('');
+  }catch(e){console.error(e)}
 }
 
-// ── Files grid ──
-function buildGridHead(){
-  let h='<tr><th class="date-h">Date</th>';
-  SYMS.forEach(s=>h+=`<th class="sym-h" colspan="2">${s}</th>`);
-  h+='<th>Tags</th></tr><tr><th></th>';
-  SYMS.forEach(()=>DTS.forEach(d=>h+=`<th style="font-size:.58rem;color:#4d5566">${d==='TRADES'?'TR':'BA'}</th>`));
+// ── grid ──
+function buildHead(){
+  let h='<tr><th class="dh">Date</th>';
+  SYMS.forEach(s=>h+=`<th class="sh" colspan="2">${s}</th>`);
+  h+='<th style="min-width:70px">Tags</th></tr><tr><th></th>';
+  SYMS.forEach(()=>DTS.forEach(d=>h+=`<th style="font-size:.57rem;color:#4d5566">${d==='TRADES'?'TR':'BA'}</th>`));
   h+='<th></th></tr>';
-  document.getElementById('grid-head').innerHTML=h;
+  document.getElementById('ghead').innerHTML=h;
 }
 
 function cellHtml(c){
-  if(!c)return`<span class="cell-miss">—</span>`;
-  if(c.status==='active')return`<span class="cell-act">…${fmtK(c.count)}</span>`;
-  if(c.status==='done'){
-    const v=c.verify;
-    if(v==='pass'||v==='warn')return`<span class="cell-done-v">✓${fmtK(c.count)}</span>`;
-    return`<span class="cell-done-u">· ${fmtK(c.count)}</span>`;
+  if(!c)return'<span class="cm">—</span>';
+  if(c.s==='active')return`<span class="ca">…${fmtK(c.c)}</span>`;
+  if(c.s==='done'){
+    const cnt=c.c>0?fmtK(c.c):'✓';
+    if(c.v==='pass'||c.v==='warn')return`<span class="cd">${cnt}</span>`;
+    return`<span class="cu">${cnt}</span>`;
   }
-  return`<span class="cell-miss">—</span>`;
+  return'<span class="cm">—</span>';
 }
 
 async function pollFiles(){
@@ -583,73 +648,50 @@ async function pollFiles(){
     const rows=await(await fetch('/api/files')).json();
     let html='';
     for(const row of rows){
-      const d=row.date;
-      html+=`<tr><td class="date-c">${d}</td>`;
-      SYMS.forEach(s=>DTS.forEach(dt=>{
-        html+=`<td style="text-align:center">${cellHtml(row.cells[s+'_'+dt])}</td>`;
-      }));
-      const tags=(row.tags||[]).map(t=>
-        `<span class="tag ${t.startsWith('LAST')?'tag-ld':'tag-vt'}">${t}</span>`
-      ).join('');
-      html+=`<td style="white-space:nowrap">${tags}</td></tr>`;
+      html+=`<tr><td class="dc">${row.date}</td>`;
+      SYMS.forEach(s=>DTS.forEach(dt=>{html+=`<td>${cellHtml(row.cells[s+'_'+dt])}</td>`;}));
+      const tags=(row.tags||[]).map(([tier,lbl])=>`<span class="tag ${tier==='P0'?'tp0':'tp1'}">${lbl}</span>`).join('');
+      html+=`<td>${tags}</td></tr>`;
     }
-    document.getElementById('grid-body').innerHTML=html;
-  }catch(e){console.error('files',e)}
+    document.getElementById('gbody').innerHTML=html;
+  }catch(e){console.error(e)}
 }
 
-// ── Prices ──
 async function pollPrices(){
   try{
     const p=await(await fetch('/api/prices')).json();
-    ['MES','MNQ','MYM','M2K'].forEach(s=>{
+    SYMS.forEach(s=>{
       const el=document.getElementById('p-'+s);
-      if(el) el.textContent=p[s]!=null?p[s].toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
+      if(el)el.textContent=p[s]!=null?p[s].toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
     });
   }catch(e){}
 }
 
-// ── Init ──
-buildGridHead();
-let _priceTimer=null;
-function refresh(){
-  pollStatus();
-  pollQueue();
-  pollFiles();
-}
-refresh();
-setTimeout(function loop(){pollStatus();pollQueue();pollFiles();setTimeout(loop,10000);},10000);
+buildHead();
+function tick(){pollStatus();pollQueue();pollFiles();}
+tick();
+setInterval(tick,10000);
 pollPrices();
-setTimeout(function ploop(){pollPrices();setTimeout(ploop,60000);},60000);
+setInterval(pollPrices,60000);
 </script>
-</body>
-</html>"""
+</body></html>"""
 
 @app.route("/")
 def index():
     return _HTML
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     import argparse as _ap
-    parser = _ap.ArgumentParser()
-    parser.add_argument("--real", action="store_true")
-    parser.add_argument("--port", type=int, default=5050)
-    args = parser.parse_args()
-
+    p = _ap.ArgumentParser()
+    p.add_argument("--real", action="store_true")
+    p.add_argument("--port", type=int, default=5050)
+    args = p.parse_args()
     if not args.real:
-        print("[dashboard] --real flag required. Exiting.")
-        sys.exit(0)
-
-    # Single-instance guard
-    def _port_in_use(p):
+        print("[dashboard] --real flag required"); import sys; sys.exit(0)
+    def _used(port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            return s.connect_ex(("127.0.0.1", p)) == 0
-    if _port_in_use(args.port):
-        print(f"[dashboard] port {args.port} already in use — exiting")
-        sys.exit(0)
-
-    print(f"[dashboard] FETCHER2026 — http://0.0.0.0:{args.port}")
-    print(f"[dashboard] history: {HISTORY_DIR}")
-    print(f"[dashboard] progress db: {PROGRESS_DB}")
+            return s.connect_ex(("127.0.0.1", port)) == 0
+    if _used(args.port):
+        print(f"[dashboard] port {args.port} in use — exiting"); import sys; sys.exit(0)
+    print(f"[dashboard] FETCHER2026 {VERSION} — http://0.0.0.0:{args.port}")
     app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
