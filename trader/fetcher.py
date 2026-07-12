@@ -262,6 +262,7 @@ async def _paginate_window_async(ib: IB, contract,
     cursor = win_start
     last_processed_ts = None
     last_batch_fps: set = set()
+    consec_timeouts = 0   # consecutive timeouts at the same cursor — breaks infinite loop
 
     while _running and cursor < win_end:
         if not ib.isConnected():
@@ -285,11 +286,25 @@ async def _paginate_window_async(ib: IB, contract,
                 ),
                 timeout=_TICK_TIMEOUT,
             )
+            consec_timeouts = 0   # reset on any successful response
         except asyncio.TimeoutError:
-            await asyncio.sleep(2)
+            consec_timeouts += 1
+            # After 10 consecutive timeouts (~8 min) at the same cursor, skip 15 min forward.
+            # Prevents infinite loop when IB stops responding at a specific timestamp.
+            if consec_timeouts >= 10:
+                skip_to = min(cursor + timedelta(minutes=15), win_end)
+                log.warning(f"W{win_idx} {what}: {consec_timeouts} timeouts at "
+                            f"{cursor.strftime('%H:%M UTC')} — skipping to "
+                            f"{skip_to.strftime('%H:%M UTC')}")
+                cursor = skip_to
+                consec_timeouts = 0
+                await asyncio.sleep(5)
+            else:
+                await asyncio.sleep(2)
             continue
         except Exception as e:
             log.warning(f"W{win_idx} {what} error: {e} — retrying")
+            consec_timeouts = 0
             await asyncio.sleep(5)
             continue
 
