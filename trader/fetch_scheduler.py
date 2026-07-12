@@ -52,6 +52,7 @@ UTC = ZoneInfo("UTC")
 
 log = get_logger("fetch_scheduler")
 
+_SCHED_VERSION = "2.2"
 _LOCK_FILE = _ROOT / "data" / "fetch_scheduler.lock"
 
 
@@ -252,12 +253,12 @@ _ALGO_SYMBOLS = ["MES", "MNQ", "MYM", "M2K"]
 def _get_priority_dates(cfg, symbols: list) -> list:
     """
     Return list of (symbol, date) pairs to fetch, priority order:
-      P0. ALGO      — last working day, all 4 symbols (MES/MNQ/MYM/M2K).
-                      CriticalCorallations2026 depends on this for live decisions. Always first.
-      P1. CRITICAL  — dates in verified_trades (ANY symbol), missing CSV for each symbol.
-                      Backtrading priority; all symbols fetched per date for correlation.
-      P2. RESUME    — partial files in fetch_progress (finished=0, records>0) not in P0/P1.
-      P3. STANDARD  — backfill last backfill_days trading days, most recent first.
+      P0. ALGO      — last working day, all 4 symbols (MES/MNQ/MYM/M2K). Always first.
+      P1. M2K       — M2K catch-up: all historical dates where M2K CSV is missing,
+                      most recent first. Closes the 4th-symbol gap before general backfill.
+      P2. CRITICAL  — dates in verified_trades (ANY symbol), missing CSV for each symbol.
+      P3. RESUME    — partial files in fetch_progress (finished=0, records>0) not in P0-P2.
+      P4. STANDARD  — backfill last backfill_days trading days, most recent first.
     Only considers BID_ASK as missing if fetch_bid_ask is enabled in config.
     Called repeatedly during the fetch loop so priority stays current.
     """
@@ -294,7 +295,35 @@ def _get_priority_dates(cfg, symbols: list) -> list:
     pairs.extend(p0a)
     pairs.extend(p0b)
 
-    # ── P1: CRITICAL — verified trade dates, all symbols ─────────────────────
+    # Common scan parameters used by P1 and P4
+    yesterday     = (datetime.now(CT) - timedelta(days=1)).date()
+    backfill_days = int(getattr(cfg.fetcher, "backfill_days", 180))
+
+    # ── P1: M2K CATCH-UP — historical dates where M2K is missing ─────────────
+    # M2K was added as the 4th symbol after initial deployment; prioritise its
+    # backfill so the gap closes before the generic multi-symbol pass (P4) runs.
+    if "M2K" in symbols:
+        m2k_scan = yesterday
+        m2k_days = 0
+        p1_m2k_a = []   # TRADES done, only BID_ASK missing
+        p1_m2k_b = []   # TRADES missing — full fetch
+        while m2k_days < backfill_days:
+            if m2k_scan.weekday() < 5:
+                d_str = m2k_scan.strftime("%Y-%m-%d")
+                if d_str != lwd_str and _is_missing("M2K", d_str):
+                    key = ("M2K", d_str)
+                    if key not in seen:
+                        seen.add(key)
+                        if ("M2K", d_str, "trades") in present:
+                            p1_m2k_a.append(("M2K", m2k_scan))
+                        else:
+                            p1_m2k_b.append(("M2K", m2k_scan))
+                m2k_days += 1
+            m2k_scan -= timedelta(days=1)
+        pairs.extend(p1_m2k_a)
+        pairs.extend(p1_m2k_b)
+
+    # ── P2: CRITICAL — verified trade dates, all symbols ─────────────────────
     # Ordered by verified trade count DESC so high-value dates are fetched first.
     # P1a: TRADES already done, only BID_ASK missing — cheap, complete these first.
     # P1b: TRADES missing — full fetch needed, ordered by count DESC within tier.
@@ -351,17 +380,14 @@ def _get_priority_dates(cfg, symbols: list) -> list:
             seen.add(key)
             pairs.append((sym, date.fromisoformat(d_str)))
 
-    # ── P3: STANDARD — backfill recent trading days, most recent first ──────────
-    # P3a: trades CSV already present, only bidask missing — fast path, completes
-    #      the day without re-fetching trades (fetcher resumes from last tick instantly).
-    # P3b: trades missing — full fetch needed.
-    # P3a before P3b maximises number of fully complete days produced per unit time.
-    yesterday     = (datetime.now(CT) - timedelta(days=1)).date()
-    backfill_days = int(getattr(cfg.fetcher, "backfill_days", 180))
+    # ── P4: STANDARD — backfill recent trading days, most recent first ──────────
+    # P4a: trades CSV already present, only bidask missing — fast path.
+    # P4b: trades missing — full fetch needed.
+    # P4a before P4b maximises fully-complete days produced per unit time.
     scan_date     = yesterday
     days_checked  = 0
-    p3a = []  # bidask-only (trades done)
-    p3b = []  # full fetch  (trades missing)
+    p4a = []  # bidask-only (trades done)
+    p4b = []  # full fetch  (trades missing)
     while days_checked < backfill_days:
         if scan_date.weekday() < 5:  # Mon-Fri only
             d_str = scan_date.strftime("%Y-%m-%d")
@@ -371,14 +397,14 @@ def _get_priority_dates(cfg, symbols: list) -> list:
                     if key not in seen:
                         seen.add(key)
                         if (sym, d_str, "trades") in present:
-                            p3a.append((sym, scan_date))
+                            p4a.append((sym, scan_date))
                         else:
-                            p3b.append((sym, scan_date))
+                            p4b.append((sym, scan_date))
             days_checked += 1
         scan_date -= timedelta(days=1)
 
-    pairs.extend(p3a)
-    pairs.extend(p3b)
+    pairs.extend(p4a)
+    pairs.extend(p4b)
     return pairs
 
 
@@ -395,7 +421,7 @@ def run(specific_date: date = None, backfill: bool = False,
     do_bid_ask = bool(getattr(cfg.fetcher, "fetch_bid_ask", True))
     gdrive     = GDriveClient(cfg)
 
-    log.info("=== fetch_scheduler start | symbols=%s bid_ask=%s ===", symbols, do_bid_ask)
+    log.info("=== fetch_scheduler v%s start | symbols=%s bid_ask=%s ===", _SCHED_VERSION, symbols, do_bid_ask)
     _reconcile_progress(cfg)   # heal zombie rows from previous hard kills
 
     # ── Determine what to fetch ──
