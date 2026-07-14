@@ -52,7 +52,7 @@ UTC = ZoneInfo("UTC")
 
 log = get_logger("fetch_scheduler")
 
-_SCHED_VERSION = "2.2"
+_SCHED_VERSION = "2.3"
 _LOCK_FILE = _ROOT / "data" / "fetch_scheduler.lock"
 
 
@@ -182,8 +182,18 @@ def _ensure_progress_db(cfg):
 
 
 def _last_working_day() -> date:
-    """Return most recent Mon–Fri before today (skips weekends)."""
-    d = (datetime.now(CT) - timedelta(days=1)).date()
+    """Return most recent completed trading session date.
+
+    A session for date D closes at D 17:00 CT.  If today is a weekday and
+    past 17:00 CT, today's session is done — return today.  Otherwise fall
+    back to the most recent weekday before today.  This fixes a bug where
+    Monday data was never P0 until Tuesday because 'today - 1' always landed
+    on Sunday, then rolled back to Friday.
+    """
+    now_ct = datetime.now(CT)
+    if now_ct.weekday() < 5 and now_ct.hour >= 17:
+        return now_ct.date()
+    d = (now_ct - timedelta(days=1)).date()
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
