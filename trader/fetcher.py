@@ -289,9 +289,9 @@ async def _paginate_window_async(ib: IB, contract,
             consec_timeouts = 0   # reset on any successful response
         except asyncio.TimeoutError:
             consec_timeouts += 1
-            # After 10 consecutive timeouts (~8 min) at the same cursor, skip 15 min forward.
-            # Prevents infinite loop when IB stops responding at a specific timestamp.
-            if consec_timeouts >= 10:
+            # After 3 consecutive timeouts at the same cursor, skip 15 min forward.
+            # Prevents stalling on empty windows (e.g. thin Sunday-night open).
+            if consec_timeouts >= 3:
                 skip_to = min(cursor + timedelta(minutes=15), win_end)
                 log.warning(f"W{win_idx} {what}: {consec_timeouts} timeouts at "
                             f"{cursor.strftime('%H:%M UTC')} — skipping to "

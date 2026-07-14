@@ -52,7 +52,7 @@ UTC = ZoneInfo("UTC")
 
 log = get_logger("fetch_scheduler")
 
-_SCHED_VERSION = "2.3"
+_SCHED_VERSION = "2.4"
 _LOCK_FILE = _ROOT / "data" / "fetch_scheduler.lock"
 
 

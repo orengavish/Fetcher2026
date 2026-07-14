@@ -22,7 +22,7 @@ SYMBOLS  = ["MES", "MNQ", "MYM", "M2K"]
 DTYPES   = ["TRADES", "BID_ASK"]
 CT       = ZoneInfo("America/Chicago")
 F2_ROOT  = str(_ROOT).replace("\\", "/").lower()
-VERSION  = "v2.3"
+VERSION  = "v2.4"
 
 app = Flask(__name__)
 
