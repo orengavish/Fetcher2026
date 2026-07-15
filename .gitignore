@@ -5,4 +5,5 @@ __pycache__/
 logs/
 data/*.db
 data/history/
+trader/data/
 *.lock
