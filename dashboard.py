@@ -18,11 +18,13 @@ HISTORY_DIR = Path(_cfg.paths.history)
 GALAO_DB    = Path(_cfg.paths.db)
 PROGRESS_DB = GALAO_DB.parent / "fetch_progress.db"
 
-SYMBOLS  = ["MES", "MNQ", "MYM", "M2K"]
-DTYPES   = ["TRADES", "BID_ASK"]
+SYMBOLS      = ["MES", "MNQ", "MYM", "M2K"]
+DTYPES       = ["TRADES", "BID_ASK"]   # grid always shows both (historical files may exist)
+_do_bid_ask  = bool(getattr(_cfg.fetcher, "fetch_bid_ask", True))
+QUEUE_DTYPES = ["TRADES", "BID_ASK"] if _do_bid_ask else ["TRADES"]
 CT       = ZoneInfo("America/Chicago")
 F2_ROOT  = str(_ROOT).replace("\\", "/").lower()
-VERSION  = "v2.5"
+VERSION  = "v3.0"
 
 app = Flask(__name__)
 
@@ -199,7 +201,7 @@ def _build_queue(progress, vt):
 
     # P0
     for sym in SYMBOLS:
-        for dtype in DTYPES:
+        for dtype in QUEUE_DTYPES:
             _add(sym, lwd, dtype, "P0", "last day")
     # P1
     for d_str, n in sorted(vt.items(), key=lambda x: -x[1]):
@@ -210,7 +212,7 @@ def _build_queue(progress, vt):
         if d == lwd:
             continue
         for sym in SYMBOLS:
-            for dtype in DTYPES:
+            for dtype in QUEUE_DTYPES:
                 _add(sym, d, dtype, "P1", f"{n}vt")
     # P2
     for (sym, d_str, dtype), row in progress.items():
@@ -225,7 +227,7 @@ def _build_queue(progress, vt):
         if d == lwd or d.isoformat() in vt_dates:
             continue
         for sym in SYMBOLS:
-            for dtype in DTYPES:
+            for dtype in QUEUE_DTYPES:
                 _add(sym, d, dtype, "P3", "backfill")
     return queue
 
