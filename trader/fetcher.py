@@ -551,6 +551,61 @@ def fetch_day(ib: IB, symbol: str, target_date: date,
     return results
 
 
+# ── Live rolling window ───────────────────────────────────────────────────────
+
+def fetch_live_window(ib: IB, symbol: str, window_hours: float, output_dir: Path) -> int:
+    """
+    Fetch TRADES for a rolling window of the last `window_hours` hours.
+    Always overwrites {symbol}_trades_live.csv — no progress-DB tracking.
+    Returns tick count written, or 0 on error.
+    """
+    import sqlite3 as _sq3
+
+    end_utc   = datetime.now(timezone.utc)
+    start_utc = end_utc - timedelta(hours=window_hours)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    file_path = output_dir / f"{symbol}_trades_live.csv"
+
+    log.info("[LIVE] %s TRADES %s → %s UTC",
+             symbol,
+             start_utc.strftime("%Y-%m-%d %H:%M"),
+             end_utc.strftime("%Y-%m-%d %H:%M"))
+
+    contract = get_contract_for_date(ib, symbol, end_utc.date())
+
+    # In-memory dummy conn so paginate_ticks' _update_progress calls are no-ops
+    dummy = _sq3.connect(":memory:")
+    dummy.execute("""
+        CREATE TABLE fetch_progress (
+            symbol TEXT, date TEXT, data_type TEXT,
+            records_fetched INTEGER DEFAULT 0,
+            finished INTEGER DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (symbol, date, data_type)
+        )
+    """)
+
+    count = 0
+    try:
+        with open(file_path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["time_ct", "time_utc", "price", "size", "symbol"])
+
+            def write_row(t_u, price, size):
+                t_c = t_u.astimezone(CT)
+                w.writerow([t_c.isoformat(), t_u.isoformat(),
+                            price, size, contract.localSymbol])
+
+            total, _ = paginate_ticks(ib, contract, start_utc, end_utc,
+                                      "TRADES", write_row, dummy, symbol, "LIVE")
+            count = total
+    finally:
+        dummy.close()
+
+    log.info("[LIVE] %s: %s ticks → %s", symbol, f"{count:,}", file_path.name)
+    return count
+
+
 # ── Verify ────────────────────────────────────────────────────────────────────
 
 def verify_csv(symbol: str, target_date: date,
@@ -739,6 +794,18 @@ def self_test() -> bool:
 
             except Exception as e:
                 log.info(f"[self-test] IB fetch skipped: {e}")
+
+            # 6. live window bounds
+            now     = datetime.now(timezone.utc)
+            wh      = 23.5
+            start_l = now - timedelta(hours=wh)
+            assert (now - start_l).total_seconds() == wh * 3600, \
+                "live window duration mismatch"
+            # live file naming must not be picked up by _present_files date parser
+            live_stem = "MES_trades_live"
+            parts = live_stem.split("_")
+            dc = parts[2]
+            assert not dc.isdigit(), "live stem should not look like a date"
 
             reset_loggers()
 

@@ -34,6 +34,8 @@ def run(show_all: bool = False):
             parts = f.stem.split("_")
             if len(parts) < 3: continue
             sym, ftype, dc = parts[0], parts[1], parts[2]
+            if not dc.isdigit() or len(dc) != 8:
+                continue  # skip live/rolling files
             if f.stat().st_size > 100:
                 date_s = f"{dc[:4]}-{dc[4:6]}-{dc[6:]}"
                 present.add((sym, date_s, ftype))

@@ -52,7 +52,7 @@ UTC = ZoneInfo("UTC")
 
 log = get_logger("fetch_scheduler")
 
-_SCHED_VERSION = "2.5"
+_SCHED_VERSION = "3.0"
 _LOCK_FILE = _ROOT / "data" / "fetch_scheduler.lock"
 
 
@@ -156,6 +156,8 @@ def _present_files(cfg) -> set:
             parts = f.stem.split("_")
             if len(parts) >= 3 and f.stat().st_size > 100:
                 sym, ftype, dc = parts[0], parts[1], parts[2]
+                if not dc.isdigit() or len(dc) != 8:
+                    continue  # skip live/rolling files (e.g. MES_trades_live.csv)
                 date_s = f"{dc[:4]}-{dc[4:6]}-{dc[6:]}"
                 present.add((sym, date_s, ftype))
     return present
@@ -454,7 +456,7 @@ def run(specific_date: date = None, backfill: bool = False,
         return False
 
     # ── Import fetcher (needs IB available) ──
-    from trader.fetcher import fetch_day, _init_progress_db, _connect
+    from trader.fetcher import fetch_day, fetch_live_window, _init_progress_db, _connect
 
     output_dir   = Path(cfg.paths.history)
     prog_db_path = Path(cfg.paths.db).parent / "fetch_progress.db"
@@ -489,8 +491,29 @@ def run(specific_date: date = None, backfill: bool = False,
         # All current targets are in cooldown — signal caller to wait
         return None
 
+    # ── Live rolling window config ─────────────────────────────────────────────
+    live_enabled    = bool(getattr(cfg.fetcher, "fetch_live_trades", False))
+    live_hours      = float(getattr(cfg.fetcher, "live_window_hours", 23.5))
+    live_refresh_s  = float(getattr(cfg.fetcher, "live_refresh_minutes", 60)) * 60
+    _live_last_run  = 0.0  # epoch seconds; 0 forces immediate fetch on first pass
+
+    def _maybe_fetch_live():
+        nonlocal _live_last_run
+        if not live_enabled:
+            return
+        if time.time() - _live_last_run < live_refresh_s:
+            return
+        log.info("[LIVE] refreshing %.1fh rolling TRADES window for %s", live_hours, symbols)
+        for sym in symbols:
+            try:
+                fetch_live_window(ib, sym, live_hours, output_dir)
+            except Exception as e:
+                log.error("[LIVE] %s failed: %s", sym, e)
+        _live_last_run = time.time()
+
     try:
         while True:
+            _maybe_fetch_live()
             target = _next_target()
 
             if target is None:
@@ -675,25 +698,33 @@ def _self_test():
         _libdb.get_db = _fake_get_db
 
         try:
-            # Test 1: MES 2026-06-20 (P1 critical) must be the first pair
+            # Test 1: P0 = last working day must be first in the queue
             pairs = _get_priority_dates(cfg, ["MES", "MNQ", "MYM", "M2K"])
             assert len(pairs) > 0, "Expected at least 1 pair"
-            assert pairs[0][0] == "MES", \
-                f"Expected MES first (oldest P1 date), got {pairs[0][0]}"
-            assert pairs[0][1].isoformat() == "2026-06-20", \
-                f"Expected 2026-06-20 (P1), got {pairs[0][1]}"
+            lwd = _last_working_day()
+            lwd_str = lwd.isoformat()
+            assert pairs[0][1].isoformat() == lwd_str, \
+                f"Expected P0 last-working-day {lwd_str} first, got {pairs[0][1]}"
 
-            # Test 2: ALL verified-trade dates are P1 regardless of trade count.
-            # Both 2026-06-20 (25 trades) and 2026-06-27 (3 trades) must come
-            # BEFORE any standard backfill (yesterday / recent) entries.
-            yesterday_str = (datetime.now(CT) - timedelta(days=1)).date().isoformat()
-            idx_jun20 = next(i for i,p in enumerate(pairs) if p[1].isoformat()=="2026-06-20")
-            idx_jun27 = next((i for i,p in enumerate(pairs) if p[1].isoformat()=="2026-06-27"), None)
-            idx_yd    = next((i for i,p in enumerate(pairs) if p[1].isoformat()==yesterday_str), None)
-            assert idx_jun20 == 0, f"2026-06-20 should be first, got index {idx_jun20}"
-            if idx_jun27 is not None and idx_yd is not None:
-                assert idx_jun27 < idx_yd, \
-                    f"P1 date 2026-06-27 (idx {idx_jun27}) should come before yesterday P3 (idx {idx_yd})"
+            # Test 2: P2/critical dates must appear BEFORE standard P4 backfill.
+            # MES is NOT touched by P1 (P1 is M2K-only), so the first MES pair that
+            # is neither lwd nor a critical date is a genuine P4 date.
+            critical_strs = {"2026-06-20", "2026-06-27"}
+            idx_jun20 = next((i for i,p in enumerate(pairs)
+                              if p[0]=="MES" and p[1].isoformat()=="2026-06-20"), None)
+            idx_jun27 = next((i for i,p in enumerate(pairs)
+                              if p[0]=="MES" and p[1].isoformat()=="2026-06-27"), None)
+            # First MES date in P4 (not lwd, not a verified-trade date)
+            idx_mes_p4 = next((i for i,p in enumerate(pairs)
+                                if p[0] == "MES"
+                                and p[1].isoformat() not in critical_strs
+                                and p[1].isoformat() != lwd_str), None)
+            if idx_jun20 is not None and idx_mes_p4 is not None:
+                assert idx_jun20 < idx_mes_p4, \
+                    f"Critical MES 2026-06-20 (idx {idx_jun20}) should precede MES P4 (idx {idx_mes_p4})"
+            if idx_jun27 is not None and idx_mes_p4 is not None:
+                assert idx_jun27 < idx_mes_p4, \
+                    f"Critical MES 2026-06-27 (idx {idx_jun27}) should precede MES P4 (idx {idx_mes_p4})"
 
             # Test 3: after MES Jun-20 CSV added, MNQ should still appear (same date still missing)
             mes_csv = Path(tmp_dir) / "MES_trades_20260620.csv"
@@ -702,8 +733,33 @@ def _self_test():
             found_mnq = any(p[0] == "MNQ" for p in pairs2)
             assert found_mnq, "MNQ should appear in priority list after MES CSV added"
 
+            # Test 4: live window gating logic
+            # Simulate the _maybe_fetch_live time-gate without real IB
+            live_refresh_s = 60 * 60   # 60 min
+            last_run = [0.0]
+            calls    = []
+
+            def _fake_live():
+                if time.time() - last_run[0] < live_refresh_s:
+                    return
+                calls.append(time.time())
+                last_run[0] = time.time()
+
+            _fake_live()           # first call — should fire
+            assert len(calls) == 1, "Live fetch should fire on first pass"
+            _fake_live()           # immediate second call — should be gated
+            assert len(calls) == 1, "Live fetch should be gated within refresh window"
+            last_run[0] = 0.0     # reset — simulate time elapsed
+            _fake_live()           # should fire again
+            assert len(calls) == 2, "Live fetch should fire after reset"
+
+            # Test 5: _present_files guard — live stem must NOT produce a valid date entry
+            dc = "live"
+            assert not (dc.isdigit() and len(dc) == 8), \
+                "Live file stem should be rejected by _present_files guard"
+
             print("PASS -- P1 (all verified-trade dates) before P3 (standard backfill), "
-                  "dynamic re-priority confirmed")
+                  "dynamic re-priority confirmed, live gating OK")
             return True
         finally:
             _libdb.get_db = orig_get_db

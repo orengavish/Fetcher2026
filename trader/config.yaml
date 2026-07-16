@@ -21,8 +21,11 @@ symbols:
 
 fetcher:
   auto_fetch_enabled: true
-  fetch_bid_ask: true
-  backfill_bid_ask: true
+  fetch_bid_ask: false
+  backfill_bid_ask: false
+  fetch_live_trades: true
+  live_window_hours: 23.5
+  live_refresh_minutes: 60
   backfill_days: 180
   fetch_on_startup: true
   symbols_override:
