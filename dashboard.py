@@ -24,7 +24,7 @@ _do_bid_ask  = bool(getattr(_cfg.fetcher, "fetch_bid_ask", True))
 QUEUE_DTYPES = ["TRADES", "BID_ASK"] if _do_bid_ask else ["TRADES"]
 CT       = ZoneInfo("America/Chicago")
 F2_ROOT  = str(_ROOT).replace("\\", "/").lower()
-VERSION  = "v3.0"
+VERSION  = "v3.1"
 
 app = Flask(__name__)
 
@@ -359,6 +359,16 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-seri
 .hp-y{background:#3d2f0022;color:#d29922;border:1px solid #7d5c1044}
 .hdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
 .hbar-time{margin-left:auto;font-size:.62rem;color:#4d5566;font-family:monospace}
+.menu-wrap{position:relative}
+.menu-btn{background:transparent;border:1px solid #21262d;border-radius:6px;color:#8b949e;
+  font-size:.72rem;padding:2px 8px;cursor:pointer;line-height:1.4}
+.menu-btn:hover{background:#161b22;color:#c9d1d9}
+.menu-dd{display:none;position:absolute;right:0;top:100%;margin-top:4px;background:#161b22;
+  border:1px solid #21262d;border-radius:6px;min-width:11rem;z-index:50;
+  box-shadow:0 4px 20px rgba(0,0,0,.5);padding:4px 0}
+.menu-dd.open{display:block}
+.menu-dd a{display:block;padding:6px 12px;color:#c9d1d9;text-decoration:none;font-size:.7rem}
+.menu-dd a:hover{background:#21262d}
 
 /* LED + throughput row */
 .led-row{display:flex;align-items:center;gap:14px;padding:10px 14px;
@@ -459,6 +469,14 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-seri
     <span class="hpill hp-g"><span class="hdot"></span>Dashboard</span>
     <span id="clean-lbl" style="font-size:.62rem;color:#4d5566;margin-left:4px"></span>
     <span class="hbar-time" id="hbar-time"></span>
+    <div class="menu-wrap">
+      <button class="menu-btn" onclick="document.getElementById('menu-dd').classList.toggle('open')" title="Other dashboards">&#128279;</button>
+      <div class="menu-dd" id="menu-dd">
+        <a id="menu-link-cc2026" target="_blank">CC2026 Dashboard</a>
+        <a id="menu-link-fetcher" target="_blank">Fetcher2026 (this)</a>
+        <a id="menu-link-geva" target="_blank">GevaExtract</a>
+      </div>
+    </div>
   </div>
 
   <!-- LED + throughput + active -->
@@ -695,6 +713,17 @@ tick();
 setInterval(tick,10000);
 pollPrices();
 setInterval(pollPrices,60000);
+
+// Cross-dashboard menu — same host, different port, works on localhost/LAN/Tailscale
+(function(){
+  const base=location.protocol+'//'+location.hostname;
+  document.getElementById('menu-link-cc2026').href  = base+':5003';
+  document.getElementById('menu-link-fetcher').href = base+':5050';
+  document.getElementById('menu-link-geva').href    = base+':5005';
+  document.addEventListener('click',(e)=>{
+    if(!e.target.closest('.menu-wrap')) document.getElementById('menu-dd').classList.remove('open');
+  });
+})();
 </script>
 </body></html>"""
 
