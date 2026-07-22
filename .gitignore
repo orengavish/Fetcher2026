@@ -7,3 +7,8 @@ data/*.db
 data/history/
 trader/data/
 *.lock
+data/bars1s/
+data/bars1s_run*.log
+data/bars1s_viewer.log
+data/bars1s_viewer.html
+data/bars1s_rate_cache.json
