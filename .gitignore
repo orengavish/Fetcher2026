@@ -8,7 +8,16 @@ data/history/
 trader/data/
 *.lock
 data/bars1s/
+data/bars5s/
+data/bars30s/
 data/bars1s_run*.log
+data/bars5s_run*.log
+data/bars30s_run*.log
 data/bars1s_viewer.log
 data/bars1s_viewer.html
 data/bars1s_rate_cache.json
+data/*_chunk_failures.json
+data/bars_watchdog_schedule.json
+data/bars_overnight_baseline.json
+data/*.log
+data/*_run.log

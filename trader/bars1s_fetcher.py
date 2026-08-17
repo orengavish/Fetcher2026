@@ -1,23 +1,37 @@
 """
-trader/bars1s_fetcher.py  v1.0
+trader/bars1s_fetcher.py  v1.1
 
-Fetches 1-second TRADES bars for MES / MNQ / MYM / M2K, one year back.
+Fetches OHLCV TRADES bars for MES / MNQ / MYM / M2K from Interactive Brokers.
+Bar size is configurable (--bar-secs); defaults to 1-second bars, 4 symbols,
+252 trading days back (~1 year) — the original/current backfill.
 
-IB constraint:  reqHistoricalData barSizeSetting="1 secs" → max 1800 S (30 min) per request.
-Strategy:       chunk each CME session into 30-min windows, fetch sequentially per symbol/day.
-Pacing:         proactive 55-req/10-min rate limiter (never hits IB 162 pacing error).
+IB constraint:  reqHistoricalData max request duration depends on bar size
+                (see _BAR_SECS_TABLE): 1 secs->1800S, 5 secs->3600S,
+                10/15 secs->14400S, 30 secs->28800S. IB also doesn't retain
+                bars <=30 secs older than ~6 months — expect empty chunks
+                for older dates at those bar sizes, not an error.
+Strategy:       chunk each CME session into windows of the max allowed
+                duration, fetch sequentially per symbol/day.
+Pacing:         proactive rate limiter, default 15 req/10min PER PROCESS —
+                deliberately conservative because multiple bar-size fetchers
+                (1s/5s/30s) are expected to run concurrently against the same
+                IB account, sharing one real 60-req/10-min pacing budget.
 Memory:         buffer ≤ 1000 bars; flush + clear on every crossing.
-Progress:       data/bars1s_progress.db — resume after any crash or restart.
+Progress:       data/bars{Ns}_progress.db — resume after any crash or restart
+                (separate DB/lock/output dir per bar size, so concurrent
+                instances never collide on files).
 
-Output:   data/bars1s/{SYM}_1s_{YYYYMMDD}.csv  (one file per symbol per day)
+Output:   data/bars{Ns}/{SYM}_{Ns}_{YYYYMMDD}.csv  (one file per symbol per day)
 CSV cols: datetime_utc, open, high, low, close, volume
 
 Usage:
-  python trader/bars1s_fetcher.py               # all 4 symbols, 252 trading days (~1 yr)
-  python trader/bars1s_fetcher.py --test 10m    # run for 10 minutes then exit cleanly
-  python trader/bars1s_fetcher.py --symbol MES  # single symbol
-  python trader/bars1s_fetcher.py --days 5      # last 5 trading days only
-  python trader/bars1s_fetcher.py --self-test   # offline unit tests (no IB needed)
+  python trader/bars1s_fetcher.py                              # 1s, all 4 symbols, 252 days (default/original)
+  python trader/bars1s_fetcher.py --bar-secs 5 --symbols MES,MNQ --days 42   # 5s bars, 2 symbols, ~2 months
+  python trader/bars1s_fetcher.py --bar-secs 30 --days 252      # 30s bars, all 4 symbols, 1 year
+  python trader/bars1s_fetcher.py --test 10m                   # run for 10 minutes then exit cleanly
+  python trader/bars1s_fetcher.py --symbol MES                 # single symbol (legacy flag, still works)
+  python trader/bars1s_fetcher.py --days 5                     # last 5 trading days only
+  python trader/bars1s_fetcher.py --self-test                  # offline unit tests (no IB needed)
 """
 
 import argparse
@@ -49,8 +63,6 @@ UTC = timezone.utc
 
 _SYMBOLS      = ["MES", "MNQ", "MYM", "M2K"]
 _EXCHANGE_MAP = {"MES": "CME", "MNQ": "CME", "M2K": "CME", "MYM": "CBOT"}
-_CHUNK_SECS   = 1800        # 30 min — IB hard limit for 1-sec bars
-_BAR_SIZE     = "1 secs"
 _WHAT         = "TRADES"
 _INTER_REQ_S  = 5.0         # minimum courtesy sleep between requests — widened 2026-07-22:
                             # requests spaced only 2s apart correlated with IB/ib_insync handing
@@ -58,19 +70,118 @@ _INTER_REQ_S  = 5.0         # minimum courtesy sleep between requests — widene
                             # (caught by the response-validation guard in _fetch_day, but wider
                             # spacing reduces how often it happens in the first place)
 _FLUSH_EVERY  = 1000        # max bars held in RAM before flushing to disk
-_VERSION      = "1.0"
+_VERSION      = "1.1"
 
 _ROOT_DATA    = _ROOT / "data"
+
+# IB's max reqHistoricalData duration per bar size (durationStr upper bound).
+# Also: IB doesn't retain bars <=30 secs older than ~6 months — expect empty
+# (not erroring) chunks for older dates at these bar sizes.
+_BAR_SECS_TABLE = {
+    1:  ("1 secs",  1800),
+    5:  ("5 secs",  3600),
+    10: ("10 secs", 14400),
+    15: ("15 secs", 14400),
+    30: ("30 secs", 28800),
+}
+
+# Bar-size-dependent globals — set by _configure_bar_size(), defaults below
+# match the original/current 1-second backfill for full backward compatibility.
+_BAR_SIZE     = "1 secs"
+_CHUNK_SECS   = 1800
+_FILE_SUFFIX  = "1s"
 _OUTPUT_DIR   = _ROOT_DATA / "bars1s"
 _PROGRESS_DB  = _ROOT_DATA / "bars1s_progress.db"
 _LOCK_FILE    = _ROOT_DATA / "bars1s_fetcher.lock"
+_CRASH_FILE   = _ROOT_DATA / "bars1s_chunk_failures.json"
+
+
+def _configure_bar_size(bar_secs: int):
+    """Set all bar-size-dependent globals. Each bar size gets its own output
+    dir / progress DB / lock file, so concurrent instances (e.g. 1s + 5s + 30s
+    fetchers running at once) never collide on files."""
+    global _BAR_SIZE, _CHUNK_SECS, _FILE_SUFFIX, _OUTPUT_DIR, _PROGRESS_DB, _LOCK_FILE, _CRASH_FILE
+    if bar_secs not in _BAR_SECS_TABLE:
+        raise ValueError(f"Unsupported --bar-secs {bar_secs}; choose one of {sorted(_BAR_SECS_TABLE)}")
+    _BAR_SIZE, _CHUNK_SECS = _BAR_SECS_TABLE[bar_secs]
+    _FILE_SUFFIX = f"{bar_secs}s"
+    _OUTPUT_DIR  = _ROOT_DATA / f"bars{_FILE_SUFFIX}"
+    _PROGRESS_DB = _ROOT_DATA / f"bars{_FILE_SUFFIX}_progress.db"
+    _LOCK_FILE   = _ROOT_DATA / f"bars{_FILE_SUFFIX}_fetcher.lock"
+    _CRASH_FILE  = _ROOT_DATA / f"bars{_FILE_SUFFIX}_chunk_failures.json"
+
+
+# ── Crash-loop circuit breaker ────────────────────────────────────────────────
+# A chunk that fails on every attempt raises (see _fetch_day) so the process
+# restarts fresh rather than silently faking completion — correct, but found
+# 2026-07-23 to crash-loop forever when IB simply can't serve one specific
+# chunk no matter how many times reconnected (always the same end-of-session
+# chunk). This persists a per-chunk failure count across restarts so that
+# after _MAX_CHUNK_CRASHES process crashes on the *exact same* chunk, that day
+# is skipped (left correctly incomplete, never faked) instead of blocking
+# forever — see BARS1S_STATUS.md §0i.
+#
+# Lowered 3->1 for TAIL chunks the same night (§0j): by then the pattern had
+# been confirmed as a systemic, ~100%-reproducible failure — the last 1-2
+# chunks of the MOST RECENTLY completed session, across every bar size
+# (1s/5s/30s) and every symbol — not a transient blip worth 3 restarts'
+# patience for. A chunk anywhere else in the day still gets the more patient
+# budget (see the is_tail_chunk check in _fetch_day) since a non-tail chunk
+# failing this hard looks like a real outage rather than the known quirk,
+# and shouldn't be given up on as fast.
+_MAX_CHUNK_CRASHES = 1
+
+
+def _load_crash_counts() -> dict:
+    try:
+        import json
+        return json.loads(_CRASH_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _record_chunk_crash(key: str) -> int:
+    import json
+    counts = _load_crash_counts()
+    counts[key] = counts.get(key, 0) + 1
+    try:
+        _CRASH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CRASH_FILE.write_text(json.dumps(counts))
+    except Exception:
+        pass
+    return counts[key]
+
+
+def _clear_chunk_crash(key: str):
+    counts = _load_crash_counts()
+    if key in counts:
+        del counts[key]
+        try:
+            import json
+            _CRASH_FILE.write_text(json.dumps(counts))
+        except Exception:
+            pass
+
 
 # Shared stop flag — set by SIGINT handler or --test timer
 _state = {"running": True, "stop_at": None}   # mutable dict avoids global-in-closure
 
 # ── IB pacing rate limiter ────────────────────────────────────────────────────
 _req_timestamps: deque = deque()
-_PACE_MAX_REQS = 55    # 55 of 60 allowed — 5-slot safety margin
+# Was 15, set when 3 bar-size fetchers ran concurrently (each needing a small
+# share of the shared 60-req/10-min budget). Since §0d/§0e that's no longer
+# true — bars_fetch_watchdog.py runs exactly ONE fetcher at a time — so 15 was
+# needlessly strangling throughput: the overnight 2026-07-23/24 benchmark
+# showed the active stage spending ~90% of its allotted run time asleep on
+# this throttle with ZERO real pacing violations the whole night (see
+# BARS1S_STATUS.md §0k). Raised to 40, still leaving real headroom out of 60
+# for external IB consumers on this machine (back-trading/trading_dashboard.py
+# etc.) — re-lower this if pacing violations start showing up for real.
+#
+# Overridable via --pace-max (§0l): 1s and 30s now run concurrently with each
+# other (not with 5s), so they need to split a budget between just the two of
+# them rather than each assuming they have the full 40 to themselves.
+_PACE_MAX_REQS = 40
 _PACE_WINDOW_S = 600   # 10-minute rolling window
 
 
@@ -253,35 +364,69 @@ def _scan_clean_prefix(path: Path) -> int:
     return clean_rows
 
 
-def _fetch_day(ib: IB, conn: sqlite3.Connection,
-               symbol: str, day: date, contract) -> int:
-    """
-    Fetch all 1-sec bars for (symbol, day).
-    Resumes from last completed chunk. Flushes every _FLUSH_EVERY bars.
-    Returns total bar count written this call (0 if already done or interrupted).
-    """
-    date_str  = day.isoformat()
+def _build_chunks(day: date):
+    """Return (chunk_ends, chunk_sizes, total_chunks) for a session — the
+    ordered list of chunk-end times and, for each, how many bars it's
+    expected to contribute (usually _CHUNK_SECS, but computed rather than
+    assumed so DST-edge days stay correct). Shared by _fetch_day and
+    bars1s_repair.py so both use identical chunk math."""
     start_utc, end_utc = _session_bounds(day)
-
-    # Build ordered list of chunk-end times (each chunk = 30 min prior) and,
-    # for each, how many bars it's expected to contribute (usually 1800, but
-    # computed rather than assumed so DST-edge days stay correct).
     chunk_ends = []
     t = start_utc + timedelta(seconds=_CHUNK_SECS)
     while t < end_utc:
         chunk_ends.append(t)
         t += timedelta(seconds=_CHUNK_SECS)
     chunk_ends.append(end_utc)   # always include exact session end
-    total_chunks = len(chunk_ends)
     chunk_sizes = [
         max(0, int((ce - max(ce - timedelta(seconds=_CHUNK_SECS), start_utc)).total_seconds()))
         for ce in chunk_ends
     ]
+    return chunk_ends, chunk_sizes, len(chunk_ends)
+
+
+def _verify_chunks_done(out_path: Path, chunk_sizes: list, claimed_done: int):
+    """Check how many of the first `claimed_done` chunks are actually backed
+    by clean (non-duplicate, in-order) rows on disk. Returns
+    (verified_done, verified_rows). Used both by _fetch_day's resume self-heal
+    and by bars1s_repair.py's proactive scan — same logic, same source of
+    truth (the file itself), so a day can never be trusted as more complete
+    than what's genuinely on disk."""
+    if claimed_done <= 0 or not out_path.exists():
+        return 0, 0
+    clean_rows = _scan_clean_prefix(out_path)
+    verified_done = 0
+    running = 0
+    for size in chunk_sizes[:claimed_done]:
+        if running + size > clean_rows:
+            break
+        running += size
+        verified_done += 1
+    return verified_done, running
+
+
+def _fetch_day(session: "_IBSession", conn: sqlite3.Connection,
+               symbol: str, day: date, contract) -> int:
+    """
+    Fetch all 1-sec bars for (symbol, day).
+    Resumes from last completed chunk. Flushes every _FLUSH_EVERY bars.
+    Returns total bar count written this call (0 if already done or interrupted).
+
+    Raises ConnectionError if the IB connection is lost and cannot be
+    restored — deliberately fatal (see _IBSession/_is_disconnect_msg): the
+    alternative, silently accepting empty results from a dead connection as
+    "no trades this window", is what produced entire days falsely marked
+    finished with zero real bars (2026-07-23 incident, see
+    BARS1S_STATUS.md §0f). Better to crash and let bars_fetch_watchdog.py
+    restart the process than to keep advancing progress on nothing.
+    """
+    date_str  = day.isoformat()
+    start_utc, end_utc = _session_bounds(day)
+    chunk_ends, chunk_sizes, total_chunks = _build_chunks(day)
 
     already_done = _chunks_done(conn, symbol, date_str)
 
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = _OUTPUT_DIR / f"{symbol}_1s_{day.strftime('%Y%m%d')}.csv"
+    out_path = _OUTPUT_DIR / f"{symbol}_{_FILE_SUFFIX}_{day.strftime('%Y%m%d')}.csv"
 
     # Self-heal: don't blindly trust the progress DB. Verify the file's actual
     # tail is genuinely clean before resuming from it — a prior crash could
@@ -289,15 +434,14 @@ def _fetch_day(ib: IB, conn: sqlite3.Connection,
     # otherwise causes chunks to be silently re-fetched and duplicated (or the
     # real remaining chunks to be skipped entirely once finished=1 is set).
     if already_done > 0 and out_path.exists():
-        clean_rows = _scan_clean_prefix(out_path)
-        verified_done = 0
-        running = 0
-        for size in chunk_sizes[:already_done]:
-            if running + size > clean_rows:
-                break
-            running += size
-            verified_done += 1
-        if verified_done < already_done:
+        verified_done, running = _verify_chunks_done(out_path, chunk_sizes, already_done)
+        shortfall = already_done - verified_done
+        # A day marked fully done but short by <=2 chunks matches the accepted
+        # permanent tail-gap pattern (see §0k just above in this function) —
+        # not corruption. Without this exception, self-heal would truncate and
+        # endlessly re-attempt a gap that's already been deliberately accepted.
+        is_accepted_tail_gap = already_done >= total_chunks and 0 < shortfall <= 2
+        if verified_done < already_done and not is_accepted_tail_gap:
             log.warning(
                 "%s %s: progress DB said chunks_done=%d but only %d chunks "
                 "(%d rows) verified clean on disk — truncating and re-fetching "
@@ -359,11 +503,34 @@ def _fetch_day(ib: IB, conn: sqlite3.Connection,
 
             end_str = chunk_end.strftime("%Y%m%d %H:%M:%S") + " UTC"
 
+            # got_valid_result is the single source of truth for "is it safe
+            # to advance progress for this chunk". Every rejection path below
+            # (dead connection, pacing violation, stale/wrong-window response)
+            # leaves it False. If every attempt is exhausted without it ever
+            # becoming True, the chunk is a hard failure — never silently
+            # accepted as "no trades this window" (that exact gap, for two
+            # different rejection reasons, produced two separate incidents:
+            # connection-loss on 2026-07-23 and stale-window exhaustion found
+            # the same day while repairing the connection-loss incident — see
+            # BARS1S_STATUS.md §0f/§0g).
             attempt = 0
             bar_list = []
+            got_valid_result = False
+            fail_streak = 0   # consecutive failures this chunk, any reason
             while attempt < 6 and _ok():
                 attempt += 1
                 _last_ib_error["code"] = None
+
+                ib = session.get()
+                if not ib.isConnected():
+                    log.warning("%s %s chunk %d/%d: IB not connected — reconnecting",
+                                symbol, date_str, i + 1, total_chunks)
+                    ib = session.reconnect()
+                    if not ib.isConnected():
+                        fail_streak += 1
+                        time.sleep(15)
+                        continue
+
                 try:
                     _throttle()
                     candidate = ib.reqHistoricalData(
@@ -378,8 +545,15 @@ def _fetch_day(ib: IB, conn: sqlite3.Connection,
                         timeout=30,
                     ) or []
                 except Exception as exc:
-                    msg = str(exc).lower()
-                    wait = 30 if "pacing" in msg else 5
+                    msg = str(exc)
+                    fail_streak += 1
+                    if _is_disconnect_msg(msg):
+                        log.warning("%s %s chunk %d/%d attempt %d: connection error (%s) — reconnecting",
+                                    symbol, date_str, i + 1, total_chunks, attempt, exc)
+                        session.reconnect()
+                        time.sleep(10)
+                        continue
+                    wait = 30 if "pacing" in msg.lower() else 5
                     log.warning("%s %s chunk %d/%d attempt %d: %s — retry in %ds",
                                 symbol, date_str, i + 1, total_chunks, attempt, exc, wait)
                     time.sleep(wait)
@@ -393,6 +567,7 @@ def _fetch_day(ib: IB, conn: sqlite3.Connection,
                 # is trusted as "no trades occurred".
                 err_msg = (_last_ib_error["msg"] or "").lower()
                 if not candidate and "pacing" in err_msg:
+                    fail_streak += 1
                     log.warning("%s %s chunk %d/%d attempt %d: pacing violation "
                                 "(%s) — retrying in 30s",
                                 symbol, date_str, i + 1, total_chunks, attempt,
@@ -410,16 +585,98 @@ def _fetch_day(ib: IB, conn: sqlite3.Connection,
                     last_dt  = _bar_dt(candidate[-1])
                     if (first_dt and first_dt < actual_start - timedelta(seconds=1)) or \
                        (last_dt and last_dt >= chunk_end):
+                        fail_streak += 1
                         log.warning(
                             "%s %s chunk %d/%d attempt %d: got stale window (%s..%s), "
-                            "expected [%s, %s) — retrying",
+                            "expected [%s, %s) — retrying (streak %d)",
                             symbol, date_str, i + 1, total_chunks, attempt,
-                            first_dt, last_dt, actual_start, chunk_end)
+                            first_dt, last_dt, actual_start, chunk_end, fail_streak)
+                        if fail_streak >= 3:
+                            # Reconnecting breaks whatever's serving the stale
+                            # response far more reliably than just waiting —
+                            # repeating the identical request against the same
+                            # connection kept re-hitting the same stale data.
+                            session.reconnect()
                         time.sleep(15)
                         continue
 
                 bar_list = candidate
+                got_valid_result = True
+                _clear_chunk_crash(f"{symbol}|{date_str}|{i}")
                 break
+
+            if not got_valid_result:
+                # Every attempt failed (connection, pacing, or stale-window) —
+                # never silently accept this as "no trades this window". Normally
+                # fatal by design: crash and let bars_fetch_watchdog.py restart
+                # the process fresh (a new connection sometimes succeeds where
+                # in-process reconnects didn't). But if this EXACT chunk has
+                # already caused _MAX_CHUNK_CRASHES restarts, IB genuinely can't
+                # serve it right now no matter how many times we reconnect —
+                # crashing again would just loop forever with zero progress
+                # (found 2026-07-23: same end-of-session chunk, crash-looped for
+                # hours). Skip it instead: leave the day correctly incomplete
+                # (never faked) and move on to the next pair; a future run can
+                # retry once conditions change.
+                # The confirmed-systemic failure (§0j) is specifically the last
+                # 1-2 chunks of a session — only give those the fast (1-crash)
+                # skip budget. A chunk anywhere else in the day failing this
+                # hard is a different, more concerning signal (looks like a
+                # real outage, not the known IB tail-data quirk) and deserves
+                # more patience before giving up on it — a general outage
+                # shouldn't gap out an otherwise-fine day just to move faster
+                # past a known-bad tail chunk elsewhere.
+                is_tail_chunk = i >= total_chunks - 2
+                max_crashes = _MAX_CHUNK_CRASHES if is_tail_chunk else max(_MAX_CHUNK_CRASHES, 3)
+
+                crash_key = f"{symbol}|{date_str}|{i}"
+                crash_count = _record_chunk_crash(crash_key)
+                if crash_count < max_crashes:
+                    raise ConnectionError(
+                        f"{fail_streak} consecutive failures, no valid response for {symbol} {date_str} "
+                        f"chunk {i+1}/{total_chunks} — refusing to mark it done "
+                        f"(restart {crash_count}/{max_crashes})")
+
+                if is_tail_chunk:
+                    # Confirmed 2026-07-24 (§0k): this isn't a transient issue —
+                    # EVERY day checked so far, including sessions from days
+                    # earlier (long since closed, nothing "still forming" about
+                    # them), fails at exactly this same tail position(s).
+                    # Evidence points to a genuine, likely permanent IB
+                    # data-availability gap for the final settlement-adjacent
+                    # hour of each CME session, not a bug in our request (the
+                    # logged "expected" window above is exactly correct — IB
+                    # just doesn't have it). Blocking every day forever on an
+                    # apparently permanent gap defeats the point of fetching at
+                    # all. Accept it: count THIS chunk as accounted-for (no
+                    # bars, clearly logged) and move on to the next chunk —
+                    # NOT the whole rest of the day, since the failure can hit
+                    # the second-to-last chunk without the true last chunk
+                    # necessarily failing too (observed variable gap width:
+                    # usually 1 chunk, sometimes up to 3).
+                    log.error(
+                        "%s %s chunk %d/%d failed on %d restarts — accepting as a "
+                        "permanent gap (known IB tail-hour issue, see §0k), no bars "
+                        "for this chunk, continuing", symbol, date_str, i + 1, total_chunks, crash_count)
+                    flush()
+                    chunks_now = i + 1
+                    total_bars = bars_so_far + bars_written
+                    _save(conn, symbol, date_str, chunks_now, total_chunks,
+                          total_bars, chunks_now >= total_chunks)
+                    pct = 100 * chunks_now / total_chunks
+                    print(f"  {symbol} {date_str}  {chunks_now:>2}/{total_chunks}"
+                          f"  ({pct:3.0f}%)  +   0 bars [ACCEPTED GAP]  "
+                          f"total={total_bars:,}", flush=True)
+                    time.sleep(_INTER_REQ_S)
+                    continue
+
+                log.error(
+                    "%s %s chunk %d/%d failed on %d separate process restarts — "
+                    "SKIPPING this day for now (left incomplete, not marked finished; "
+                    "will retry on a future pass)",
+                    symbol, date_str, i + 1, total_chunks, crash_count)
+                flush()
+                return bars_written
 
             for bar in bar_list:
                 dt = _bar_dt(bar)
@@ -529,15 +786,64 @@ def _connect(cfg) -> IB:
     raise ConnectionError(f"Cannot connect to IB port {cfg.ib.live_port}")
 
 
+def _is_disconnect_msg(msg: str) -> bool:
+    """True if an exception/error message indicates the IB connection itself
+    is dead (as opposed to a pacing violation, empty result, or other
+    retryable-but-still-connected condition). Found 2026-07-23: without this
+    distinction, a dropped connection just retries forever against a dead
+    socket and eventually gets silently accepted as "no trades this window"
+    — see BARS1S_STATUS.md §0f for the incident this fixes."""
+    msg = msg.lower()
+    return any(s in msg for s in (
+        "not connected", "peer closed", "connection reset",
+        "connection aborted", "socket is closed", "connection refused",
+    ))
+
+
+class _IBSession:
+    """Mutable holder for the current IB connection so a reconnect inside
+    _fetch_day() is visible to every other caller sharing this session
+    (plain reassignment of a local `ib` variable would only update the
+    reconnecting function's own copy)."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.ib = _connect(cfg)
+
+    def get(self) -> IB:
+        return self.ib
+
+    def reconnect(self) -> IB:
+        log.warning("Reconnecting to IB...")
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
+        for attempt in range(3):
+            try:
+                self.ib = _connect(self.cfg)
+                return self.ib
+            except Exception as exc:
+                log.warning("Reconnect attempt %d/3 failed: %s", attempt + 1, exc)
+                time.sleep(10)
+        return self.ib   # still whatever's left; caller checks isConnected()
+
+    def disconnect(self):
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
+
+
 # ── Main run ──────────────────────────────────────────────────────────────────
 
 def run(symbols: list, days: list):
     if not _acquire_lock():
         sys.exit(1)
 
-    cfg  = get_config()
-    conn = _init_db()
-    ib   = _connect(cfg)
+    cfg     = get_config()
+    conn    = _init_db()
+    session = _IBSession(cfg)
 
     contract_cache: dict = {}   # keyed by (symbol, "YYYYMM") — refreshed on month roll
     grand_total   = 0
@@ -545,7 +851,7 @@ def run(symbols: list, days: list):
     pairs_total   = len(days) * len(symbols)
     t0            = time.time()
 
-    print(f"\nbars1s_fetcher v{_VERSION} | {len(symbols)} symbols × {len(days)} days")
+    print(f"\nbars1s_fetcher v{_VERSION} | bar={_BAR_SIZE} | {len(symbols)} symbols × {len(days)} days")
     print(f"Output  : {_OUTPUT_DIR}")
     print(f"Progress: {_PROGRESS_DB}")
     print(f"Range   : {days[-1]} to {days[0]}\n")
@@ -572,7 +878,9 @@ def run(symbols: list, days: list):
                 month_key = (sym, day.strftime("%Y%m"))
                 if month_key not in contract_cache:
                     try:
-                        contract_cache[month_key] = _get_contract(ib, sym, day)
+                        if not session.get().isConnected():
+                            session.reconnect()
+                        contract_cache[month_key] = _get_contract(session.get(), sym, day)
                         log.info("Contract %s %s -> %s", sym, day,
                                  contract_cache[month_key].localSymbol)
                     except Exception as exc:
@@ -581,18 +889,20 @@ def run(symbols: list, days: list):
                 contract = contract_cache[month_key]
 
                 print(f"\n[{pairs_done}/{pairs_total}]  {sym}  {date_str}", flush=True)
-                n = _fetch_day(ib, conn, sym, day, contract)
+                n = _fetch_day(session, conn, sym, day, contract)
                 grand_total += n
+
+    except ConnectionError as exc:
+        log.error("FATAL: %s — exiting so the watchdog can restart cleanly", exc)
+        print(f"\n=== bars1s_fetcher: FATAL connection loss — {exc} ===")
+        raise
 
     finally:
         conn.close()
         elapsed = time.time() - t0
         print(f"\n=== bars1s_fetcher: {grand_total:,} new bars in {elapsed:.0f}s ===")
         log.info("Finished. grand_total=%d  elapsed=%.0fs", grand_total, elapsed)
-        try:
-            ib.disconnect()
-        except Exception:
-            pass
+        session.disconnect()
         _release_lock()
 
 
@@ -679,18 +989,31 @@ def self_test() -> bool:
 if __name__ == "__main__":
     _setup_signals()
 
-    parser = argparse.ArgumentParser(description=f"1-second OHLCV bar fetcher v{_VERSION}")
+    parser = argparse.ArgumentParser(description=f"OHLCV bar fetcher v{_VERSION}")
+    parser.add_argument("--bar-secs", type=int, default=1, choices=sorted(_BAR_SECS_TABLE),
+                        help="Bar size in seconds (default 1). Each size uses its own "
+                             "output dir/progress DB/lock, safe to run concurrently.")
     parser.add_argument("--symbol", help="Single symbol, e.g. MES (default: all 4)")
+    parser.add_argument("--symbols", help="Comma-separated symbols, e.g. MES,MNQ (default: all 4)")
     parser.add_argument("--days",   type=int, default=252,
                         help="Trading days back from yesterday (default 252 ≈ 1 year)")
     parser.add_argument("--test",   metavar="DURATION",
                         help="Stop after this long: 10m | 30s | 1h")
+    parser.add_argument("--pace-max", type=int, default=None,
+                        help="Override the pacing rate limiter's requests-per-10min "
+                             "budget (default 40). Lower this when running two bar-size "
+                             "fetchers concurrently so together they still fit under IB's "
+                             "real ~60/10min ceiling.")
     parser.add_argument("--self-test", action="store_true",
                         help="Run offline unit tests, no IB needed")
     args = parser.parse_args()
 
     if args.self_test:
         sys.exit(0 if self_test() else 1)
+
+    _configure_bar_size(args.bar_secs)
+    if args.pace_max is not None:
+        _PACE_MAX_REQS = args.pace_max
 
     if args.test:
         m = re.match(r"^(\d+)(s|m|h)$", args.test.strip())
@@ -700,7 +1023,12 @@ if __name__ == "__main__":
         _state["stop_at"] = time.time() + secs
         print(f"[TEST MODE] Will stop after {args.test} ({secs}s)\n")
 
-    symbols = [args.symbol.upper()] if args.symbol else _SYMBOLS
-    days    = _working_days(args.days)
+    if args.symbols:
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    elif args.symbol:
+        symbols = [args.symbol.upper()]
+    else:
+        symbols = _SYMBOLS
+    days = _working_days(args.days)
 
     run(symbols, days)

@@ -34,7 +34,7 @@ usable once cleaned, it's just a growing subset rather than the full year.
 - Repo root: `C:\Projects\Fetcher2026` (this machine, no remote/cloud access needed)
 - Data files: `C:\Projects\Fetcher2026\data\bars1s\{SYMBOL}_1s_{YYYYMMDD}.csv` — just read them with pandas/csv, no auth, no API
 - Progress DB: `C:\Projects\Fetcher2026\data\bars1s_progress.db` (SQLite, read-only queries are safe to run anytime, even while the fetcher is writing — SQLite handles concurrent readers fine)
-- Live status: `python trader/bars1s_viewer.py` from the repo root (see §2) — or open `data\bars1s_viewer.html` in a browser if a `--watch` instance is already running in the background
+- Live status: **http://localhost:5004/** (or `http://localhost:5004/api/status` for JSON) — a persistent dashboard (`trader/bars_status_server.py`) now covers all three concurrently-running fetchers (1s/5s/30s bars, see `BARS1S_STATUS.md` §0c), auto-refreshing every 10s with a real observed-throughput ETA. `python trader/bars1s_viewer.py` (see §2) still works for a quick one-shot console printout of the 1s fetcher only.
 - No credentials needed for any of this — it's all local filesystem + local SQLite, the IB connection is the fetcher's problem, not yours
 
 **Current snapshot (2026-07-22 ~08:27 UTC, will be stale immediately — re-check, don't cite this):**
