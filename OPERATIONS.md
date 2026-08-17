@@ -67,6 +67,23 @@ Web UIs: http://localhost:5050 (TRADES/BID_ASK) · http://localhost:5004 (bars)
 
 ---
 
+## 2a. Post-outage recovery checklist addendum (2026-08-17, see BARS1S_STATUS.md §0n)
+
+After bringing the bars pipeline chain back up from any extended outage, also reset
+`data/bars_watchdog_schedule.json`'s `time_spent` counters to `0` for every stage —
+otherwise a stage with a large pre-outage accumulated value (e.g. `5s` after the §0m
+19-day gap) looks artificially "already over its target share" to the deficit-weighted
+scheduler and gets starved for a long time even though it should be catching up. Do this
+with the chain stopped (edit while `bars_fetch_watchdog.py` isn't running, to avoid a
+write race), then restart via `bars_watchdog_supervisor.py` as usual.
+
+Also: always launch these scripts with the fully-qualified interpreter path below, not a
+bare `python` — a bare `python` resolves per-shell and can silently pick up an unrelated
+project's virtualenv missing `psutil`, which crash-loops `bars_fetch_watchdog.py` every
+10s under the supervisor's own restart loop.
+
+---
+
 ## 3. How to start everything (manual, foreground-safe)
 
 Run from `C:\Projects\Fetcher2026`. Each of these runs forever (its own

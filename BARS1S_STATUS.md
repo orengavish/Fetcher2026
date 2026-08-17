@@ -1,5 +1,21 @@
 # bars1s_fetcher — Status & Restart Reference
-> Written: 2026-07-22 | Updated: 2026-08-17 ~05:35 UTC | Script: v1.6 | Watchdog v3.0 | State: pipeline restarted after 19-day outage; 1s + 30s running CONCURRENTLY, 5s queued next
+> Written: 2026-07-22 | Updated: 2026-08-17 ~18:38 UTC | Script: v1.6 | Watchdog v3.0 | State: all 3 stages (5s/1s/30s) healthy, weighted rotation working correctly
+
+## 0n. UPDATE 2026-08-17 ~18:38 UTC — 5s stage found stuck idle since before the §0m outage (stale scheduler weight debt), reset and confirmed recovered
+
+**Found during a full cross-project operations check** (CC2026 session, verifying "everything running" post-§0m recovery): `bars_status_server.py`'s `/api/status` showed `5s` stage with `"health":"stalled"`, `"gap_s":1668824` (~19.3 days) and `"rate_per_min":null`, while `1s`/`30s` both looked healthy. Only `1s`/`30s` processes were actually running — no `5s` fetcher process existed.
+
+**Root cause**: `data/bars_watchdog_schedule.json`'s `time_spent` counters were never reset after the §0m recovery. `5s` still carried `2,007,220s` (~23.2 days) of accumulated runtime from before the 19-day outage, dwarfing its 80% target share, so the deficit-weighted scheduler correctly (per its own logic) kept picking `1s+30s` instead — same underlying class of bug as §0j, just triggered by a different event (an outage-and-recovery instead of a priority-weight change) that nobody thought to also reset time_spent for.
+
+**Fix**: stopped the full chain (`bars_watchdog_supervisor.py` → `bars_fetch_watchdog.py` → `bars1s_fetcher.py` ×2), reset all four `time_spent` entries in `bars_watchdog_schedule.json` to `0` (same remedy as §0j), relaunched `bars_watchdog_supervisor.py`.
+
+**Bug caught during the restart**: the very first relaunch attempt used a bare `python` on PATH, which in this shell's environment resolved to an unrelated project's venv interpreter (no `psutil` installed) — `bars_fetch_watchdog.py` crash-looped every 10s (`ModuleNotFoundError: No module named 'psutil'`) under the supervisor's own restart loop, harmless but noisy. Fixed by killing it and relaunching with the fully-qualified interpreter path (`C:\Users\galsh\AppData\Local\Programs\Python\Python311\python.exe`, per §3/OPERATIONS.md §3's own guidance) — worth remembering if a future shell's default `python` ever points somewhere else again.
+
+**Verified after the real fix**: watchdog started cleanly, `queue=['5s', '1s', '30s']`, immediately picked `5s` (now correctly the most-underserved group), cleaned the two stale 1s/30s locks, started `bars1s_fetcher.py --bar-secs 5 --symbols MES,MNQ --days 42`. `/api/status` confirmed all three stages `"health":"running"` with fresh `gap_s` (11–265s, not days).
+
+**Worth doing next time this class of event happens** (a full outage/recovery, not just a manual priority-weight change): reset `bars_watchdog_schedule.json`'s `time_spent` as a standard part of the recovery checklist, not just as a one-off fix — add it to `OPERATIONS.md` §3's start sequence as an explicit step after any extended-outage recovery.
+
+---
 
 ## 0m. UPDATE 2026-08-17 ~05:35 UTC — whole pipeline down for ~19 days (since 2026-07-29), IB Gateway stuck in a broken auto-restart loop, everything manually recovered
 
