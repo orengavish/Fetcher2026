@@ -34,7 +34,12 @@ which needs the interactive user's `config.ini`
 
 **Also sharing the same IB account/Gateway, not part of this repo, do not
 touch:** `broker.py`, `decider.py --mode session`,
-`back-trading/trading_dashboard.py` — Galgo2026's live trading system.
+`back-trading/trading_dashboard.py` — these live in `CriticalCorallations2026`
+(the "CC2026" trading brain, port 5003), not Galgo2026 (Galgo2026 is legacy,
+see `ORIENTATION.md` "My Relationship with Sibling Projects").
+
+**New here or restarting from a fresh machine?** See `RESTART_PROJECT.md`.
+**Coordinating this repo alongside CC2026/GevaExtract?** See `ORCHESTRATOR.md`.
 
 ---
 

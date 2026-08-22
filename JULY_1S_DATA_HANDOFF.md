@@ -1,4 +1,11 @@
 # July 2026 1-Second Bar Data — Handoff for Graphing / Correlation Work
+> **Stale as a status snapshot (kept for the `load_clean()` / data-quality methodology,
+> which is still valid).** Written 2026-07-22, a single point-in-time handoff for a fresh
+> consumer of the bars data. For current bars pipeline state, coverage, and known IB gaps,
+> use **`BARS1S_STATUS.md`** instead — it's the actively maintained, dated-history doc for
+> this subsystem. This file's specific numbers (coverage %, ETA, ~07-22 ~08:27 UTC snapshot)
+> are all long superseded.
+>
 > Written: 2026-07-22 ~07:20 UTC | Updated: 2026-07-22 ~08:27 UTC
 > For a fresh Claude instance, no prior context needed.
 > Source project: `C:\Projects\Fetcher2026` (background fetcher, still running)

@@ -1,4 +1,15 @@
 # Fetcher2026 — Galgo2027 Handoff Document
+> **Merge-planning doc, not current operational truth.** Written 2026-07-21 for the
+> Galgo2027 consolidation effort (started 2026-07-21/22, incomplete/stale as of last check —
+> see `CriticalCorallations2026\ORCHESTRATOR.md` §5). Several facts below are now outdated:
+> the bars pipeline (§2/§7 don't mention it — it didn't exist yet), the Task Scheduler
+> status in §7 (see `OPERATIONS.md` §4 for the actual, still-unfixed SYSTEM-principal bug),
+> and the "brother project" framing throughout (`ORIENTATION.md` now correctly identifies
+> CC2026, not Galgo2026, as the live trading brain). For **current** operational state, use
+> `ORIENTATION.md` + `OPERATIONS.md`; for a **fresh-machine restart**, use
+> `RESTART_PROJECT.md`. This doc's architectural analysis (§9-15, the Galgo2027 fit
+> assessment) is still useful context for that future merge and is kept as-is.
+>
 > Complete briefing for a fresh Claude instance. No prior context needed.
 > Written: 2026-07-21 | Version at time of writing: v3.1
 

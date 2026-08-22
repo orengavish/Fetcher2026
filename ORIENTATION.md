@@ -1,6 +1,8 @@
 # ORIENTATION — Claude's Living Brief for Fetcher2026
 > Keep this file current: update whenever scope changes, a task completes, or next-steps shift.
-> Last updated: 2026-08-17
+> Last updated: 2026-08-22
+> New here or setting up on a fresh machine? Start with **`RESTART_PROJECT.md`**. Coordinating
+> this repo alongside its siblings (CC2026, GevaExtract)? Start with **`ORCHESTRATOR.md`**.
 
 ---
 
@@ -23,17 +25,35 @@ Standalone historical tick-data fetcher for CME micro futures, **split from Galg
 
 ---
 
-## My Relationship with Brother Fetcher
+## My Relationship with Sibling Projects
 
-**Brother = Galgo2026** (`C:\Projects\Galgo2026`). It is the trading brain.
+**Correction (2026-08-22): the "trading brain" is `CriticalCorallations2026` ("CC2026"),
+not `Galgo2026`.** `Galgo2026` is the pre-split original monolith — mostly legacy now, but
+still load-bearing for one specific reason (see below). This section previously said
+Galgo2026 was the live trading brain; that was stale. Verified directly: CC2026's
+`trader/broker.py` + `trader/decider.py` + `back-trading/trading_dashboard.py` are the
+actual live (paper) trading processes running today.
 
-- Galgo2026 executes live trades, manages positions, runs the decider.
-- Fetcher2026 feeds Galgo2026's tick archive (`galao.db` + CSV history files).
-- Fetcher reads `paths.db` → Galgo's `galao.db` to know which trade dates need tick coverage.
-- `fetch_priority.py` cross-references `verified_trades` in galao.db against files on disk.
-- The two repos share `lib/` via path injection — Fetcher imports `lib.config_loader`, `lib.logger`, `lib.db`, `lib.gdrive` from root.
+- **CC2026** executes live (paper) trades, manages positions, runs the decider. Dashboard
+  on port 5003.
+- **Galgo2026** is legacy, but Fetcher2026's tick-CSV output and `fetch_progress.db` still
+  physically live under its `june\` subtree (`C:\Projects\Galgo2026\june\trader\data\history\`)
+  — a holdover from before the 3-way split, not fixed, don't delete/archive Galgo2026 until
+  this is paid off.
+- Fetcher2026's `trader/config.yaml` → `paths.db` points at
+  `C:\Projects\Galgo2026\june\data\galao.db` — **a dead, empty, pre-split copy**, not
+  CC2026's live one (`C:\Projects\CriticalCorallations2026\trader\data\galao.db`).
+  `fetch_priority.py`'s `verified_trades` cross-reference is effectively inert as a result —
+  not just "waiting for data to populate" as previously documented here, but pointed at the
+  wrong file entirely. See `RESTART_PROJECT.md` §4 / `ORCHESTRATOR.md` §4.
+- The two repos share `lib/`-style helpers by convention (`config_loader`, `logger`, `db`),
+  but **not the same code** — CC2026 and Fetcher2026 each have their own
+  `lib/config_loader.py` that diverged; don't assume a fix in one applies to the other.
 
-**Dependency direction:** Fetcher depends on Galgo's DB for priority signals. Galgo depends on Fetcher's CSVs for backtesting/analysis. They do not run in the same process.
+**Dependency direction:** Fetcher2026 depends on CC2026's `galao.db` for priority signals
+(once `paths.db` is fixed to point at it). CC2026 depends on Fetcher2026's CSVs for
+backtesting/analysis. Full cross-project map: `ORCHESTRATOR.md`, or the canonical
+`CriticalCorallations2026\ORCHESTRATOR.md`.
 
 ---
 
@@ -126,8 +146,11 @@ dated history and is the source of truth for that subsystem.
 3. **Continue TRADES + BID_ASK backfill / bars backfill** — now that everything
    is running again, let it catch up. Monitor http://localhost:5050 (TRADES)
    and http://localhost:5004 (bars).
-4. **galao.db population** — once Galgo2026 runs live sessions, `verified_trades`
-   will populate and `fetch_priority.py` becomes useful for prioritizing.
+4. **Fix `paths.db`** — repoint `trader/config.yaml`'s `paths.db` from the dead
+   Galgo2026 copy to CC2026's live `galao.db`
+   (`C:\Projects\CriticalCorallations2026\trader\data\galao.db`). Only once that's
+   fixed does "wait for `verified_trades` to populate" become the right next step
+   for making `fetch_priority.py` useful.
 5. **Google Drive upload** — `google_drive.enabled: false`. Wire up if
    off-machine CSV backup is wanted.
 
@@ -147,13 +170,16 @@ dated history and is the source of truth for that subsystem.
   locks automatically (dead PID check) — a manual run doesn't, delete by hand.
 - **Shared lib path:** `sys.path.insert(0, _ROOT)` at top of every module. If
   root changes, all imports break silently.
-- **galao.db path:** Hardcoded in config as `C:\Projects\Galgo2026\june\data\galao.db`
-  — if Galgo2026 moves, update `paths.db`.
+- **galao.db path is wrong, not just fragile:** `paths.db` points at a dead
+  pre-split copy under Galgo2026, not CC2026's live `galao.db` — see the
+  relationship section above. Fixing this is `paths.db` repointing, not a
+  "when Galgo2026 moves" future concern.
 - **SYSTEM-context watchdog:** see caveat above — don't assume
   `GalgoFetcher2026`/Task Scheduler auto-heals Gateway correctly; it currently
   doesn't.
 - **Don't touch `broker.py` / `decider.py --mode session` /
-  `back-trading/trading_dashboard.py`** — Galgo2026's live trading system,
-  shares the same IB paper account and Gateway, explicitly out of scope for
-  Fetcher2026 work. They do share Gateway health with us, though: if Gateway
-  is down, they're disconnected too.
+  `back-trading/trading_dashboard.py`** — these live in `CriticalCorallations2026`
+  (not Galgo2026, see above), are CC2026's live trading system, share the same IB
+  paper account and Gateway, and are explicitly out of scope for Fetcher2026 work.
+  They do share Gateway health with us, though: if Gateway is down, they're
+  disconnected too.
