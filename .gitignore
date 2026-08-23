@@ -21,3 +21,4 @@ data/bars_watchdog_schedule.json
 data/bars_overnight_baseline.json
 data/*.log
 data/*_run.log
+.aider*
