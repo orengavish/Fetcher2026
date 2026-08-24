@@ -41,6 +41,17 @@ see `ORIENTATION.md` "My Relationship with Sibling Projects").
 **New here or restarting from a fresh machine?** See `RESTART_PROJECT.md`.
 **Coordinating this repo alongside CC2026/GevaExtract?** See `ORCHESTRATOR.md`.
 
+**`paths.db` (config.yaml) vs. the live trading DB:** `paths.db` points at
+this repo's own progress-tracking `galao.db` (and derives `fetch_progress.db`'s
+location) — it is intentionally NOT the real trading database. The live,
+actively-written `galao.db` (verified trades, positions, etc.) lives at
+`C:\Projects\CriticalCorallations2026\trader\data\galao.db`. The only place in
+this repo that reads that live DB is `trader/fetch_priority.py`, via CC2026's
+`get_priority_dates()` (loaded directly from CC2026's `lib/db.py` by file
+path, not `cfg.paths.db`) — every other `cfg.paths.db` consumer in this repo
+is unaffected and still points at Fetcher2026's own DB. See bugs 3/11 in
+`C:\Projects\All\plan.md`.
+
 ---
 
 ## 2. How to check what's running
