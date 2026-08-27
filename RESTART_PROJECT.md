@@ -77,11 +77,18 @@ Gateway auto-restart silently fails forever. Fix before installing: change the p
 in `scripts\install_scheduler.ps1` to the interactive user, or make IBC's `StartGateway.bat`
 config path explicit instead of `%USERPROFILE%`-relative. Full detail: `OPERATIONS.md` §4.
 
-> **State as of 2026-08-27**: `GalgoFetcher2026` / `GalgoDashboard2026` are **not
-> registered** on the current machine (`Get-ScheduledTask` shows only GevaExtract's two
-> tasks), and there's no Startup-folder/`Run`-key equivalent. Nothing auto-starts Gateway
-> or either Fetcher2026 pipeline after a reboot — it's a manual §6 start every time. See
-> `CriticalCorallations2026\RESTART_PROJECT.md` §7 for the full cross-project table.
+> **State as of 2026-08-27**: `GalgoFetcher2026` / `GalgoDashboard2026` **are registered
+> and running**, but under the **SYSTEM** principal (from `scripts\reg_tasks.ps1`, not
+> `install_scheduler.ps1`), so a non-elevated `Get-ScheduledTask` / `schtasks /query`
+> can't see them (`Access is denied`) — query elevated. Both re-fire every 5 min
+> (`-RepetitionInterval 5min -MultipleInstances IgnoreNew`). **Bug**: their
+> `-ExecutionTimeLimit 4min` kills `fetch_watchdog.py` (which is meant to run forever,
+> `CHECK_INTERVAL=3600`) after 4 min, so a new watchdog + dashboard console spawns every
+> 5 min instead of one persistent process checking hourly. Noisy, not dangerous. To fix:
+> re-register elevated via `install_scheduler.ps1` (interactive-user principal) and
+> raise/remove `-ExecutionTimeLimit` in both that script and `reg_tasks.ps1`. IB Gateway
+> itself auto-starts via IBC on login. See `CriticalCorallations2026\RESTART_PROJECT.md`
+> §7 for the full cross-project table.
 
 ## 4. Config that needs manual attention
 
