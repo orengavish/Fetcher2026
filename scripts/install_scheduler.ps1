@@ -11,10 +11,14 @@ $Python      = (Get-Command python -ErrorAction Stop).Source
 $A1 = New-ScheduledTaskAction -Execute $Python `
         -Argument "`"$ProjectRoot\trader\fetch_watchdog.py`"" `
         -WorkingDirectory $ProjectRoot
+# fetch_watchdog.py is meant to run forever (self-checks hourly). The 5-min trigger +
+# IgnoreNew is a keep-alive: relaunch only if it actually died. ExecutionTimeLimit 0 =
+# "do not stop" -- a 4-min limit here killed the healthy watchdog every 4 min, so Task
+# Scheduler spawned a fresh one (new console window) every 5 min instead.
 $T1 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
 $S1 = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 4) `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 0) `
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -StartWhenAvailable
@@ -31,10 +35,12 @@ try {
 $A2 = New-ScheduledTaskAction -Execute $Python `
         -Argument "`"$ProjectRoot\dashboard.py`" --real" `
         -WorkingDirectory $ProjectRoot
+# Same rationale as Task 1: dashboard.py is a long-lived Flask server; keep-alive re-fire
+# + no execution-time limit so it isn't killed and restarted every few minutes.
 $T2 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
 $S2 = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 4) `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 0) `
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -StartWhenAvailable
