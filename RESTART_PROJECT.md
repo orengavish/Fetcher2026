@@ -77,6 +77,12 @@ Gateway auto-restart silently fails forever. Fix before installing: change the p
 in `scripts\install_scheduler.ps1` to the interactive user, or make IBC's `StartGateway.bat`
 config path explicit instead of `%USERPROFILE%`-relative. Full detail: `OPERATIONS.md` §4.
 
+> **State as of 2026-08-27**: `GalgoFetcher2026` / `GalgoDashboard2026` are **not
+> registered** on the current machine (`Get-ScheduledTask` shows only GevaExtract's two
+> tasks), and there's no Startup-folder/`Run`-key equivalent. Nothing auto-starts Gateway
+> or either Fetcher2026 pipeline after a reboot — it's a manual §6 start every time. See
+> `CriticalCorallations2026\RESTART_PROJECT.md` §7 for the full cross-project table.
+
 ## 4. Config that needs manual attention
 
 | Setting | File | Notes |
