@@ -1,6 +1,6 @@
 # ORIENTATION — Claude's Living Brief for Fetcher2026
 > Keep this file current: update whenever scope changes, a task completes, or next-steps shift.
-> Last updated: 2026-08-22
+> Last updated: 2026-09-04
 > New here or setting up on a fresh machine? Start with **`RESTART_PROJECT.md`**. Coordinating
 > this repo alongside its siblings (CC2026, GevaExtract)? Start with **`ORCHESTRATOR.md`**.
 
@@ -153,6 +153,39 @@ dated history and is the source of truth for that subsystem.
    for making `fetch_priority.py` useful.
 5. **Google Drive upload** — `google_drive.enabled: false`. Wire up if
    off-machine CSV backup is wanted.
+6. **MES 1s backfill to match Geva ground truth (2025-09-03 → 2026-09-03)** —
+   in progress via `bars1s_fetcher.py --symbol MES --days 270` (resumable,
+   skips days already on disk). Known permanent gap: 2026-05-25 (Memorial
+   Day early close) — chunks past 13:00 ET have no data, script auto-skips
+   the day after 3 restarts.
+7. **NEW (2026-09-04): MES 15-min bars, 1 year back** — running via
+   `bars1s_fetcher.py --bar-secs 900 --symbol MES --days 252`. Required two
+   fixes in `trader/bars1s_fetcher.py`:
+   - Added `900: ("15 mins", 86400)` to `_BAR_SECS_TABLE` (1 chunk/day —
+     deliberately whole-session chunks, since the resume-verification logic
+     assumes 1 row/sec and misfires for any bar size where that's false,
+     e.g. multi-chunk 5/10/15/30s bars).
+   - `is_tail_chunk` now requires `total_chunks > 1`: with 1 chunk/day, the
+     old `i >= total_chunks-2` matched every day's only chunk, so a
+     transient failure would've been silently accepted as a permanent
+     zero-bar gap after a single crash instead of retried.
+   - `durationStr` now uses `"D"` units (not `"S"`) for exact-multiple-of-day
+     requests — `"86400 S"` came back from IB shifted ~2h early,
+     identically, on fresh connections (not the known stale-cache bug,
+     which needs a prior chunk to leak from and this request had none).
+     Sub-day durations (existing 1/5/10/15/30-second bars) are unaffected.
+
+   **Result: 246/252 days fetched.** 2 days (2026-01-01, 2025-12-25) are
+   correctly empty — real full-closure holidays. **6 days are a known,
+   accepted gap** — 2026-07-06, 2026-06-22, 2026-05-26, 2026-02-17,
+   2026-01-20, 2025-11-28, every one either the trading day right after a
+   3-day holiday weekend or abutting a short holiday week. IB deterministically
+   returns a shifted multi-day window instead of the requested single day for
+   these exact dates — confirmed with 27 retries across fresh connections/
+   clientIds, 100% reproducible, not transient. Real fix would mean fetching
+   the wider window IB actually wants to serve and trimming to the target day
+   locally; decided not worth it for 6/252 days — left as a documented gap
+   rather than chased further.
 
 ---
 

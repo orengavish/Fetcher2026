@@ -28,6 +28,7 @@ Usage:
   python trader/bars1s_fetcher.py                              # 1s, all 4 symbols, 252 days (default/original)
   python trader/bars1s_fetcher.py --bar-secs 5 --symbols MES,MNQ --days 42   # 5s bars, 2 symbols, ~2 months
   python trader/bars1s_fetcher.py --bar-secs 30 --days 252      # 30s bars, all 4 symbols, 1 year
+  python trader/bars1s_fetcher.py --bar-secs 900 --symbol MES --days 252   # 15-min bars, MES, 1 year
   python trader/bars1s_fetcher.py --test 10m                   # run for 10 minutes then exit cleanly
   python trader/bars1s_fetcher.py --symbol MES                 # single symbol (legacy flag, still works)
   python trader/bars1s_fetcher.py --days 5                     # last 5 trading days only
@@ -78,11 +79,16 @@ _ROOT_DATA    = _ROOT / "data"
 # Also: IB doesn't retain bars <=30 secs older than ~6 months — expect empty
 # (not erroring) chunks for older dates at these bar sizes.
 _BAR_SECS_TABLE = {
-    1:  ("1 secs",  1800),
-    5:  ("5 secs",  3600),
-    10: ("10 secs", 14400),
-    15: ("15 secs", 14400),
-    30: ("30 secs", 28800),
+    1:   ("1 secs",  1800),
+    5:   ("5 secs",  3600),
+    10:  ("10 secs", 14400),
+    15:  ("15 secs", 14400),
+    30:  ("30 secs", 28800),
+    900: ("15 mins", 86400),   # 1 chunk/day (session < 24h) — a day of 15-min
+                               # bars is ~96 rows, trivial for one request and
+                               # sidesteps the multi-chunk resume-verification
+                               # math below (which assumes 1 row/sec and would
+                               # misfire for any bar size where that's false).
 }
 
 # Bar-size-dependent globals — set by _configure_bar_size(), defaults below
@@ -531,12 +537,22 @@ def _fetch_day(session: "_IBSession", conn: sqlite3.Connection,
                         time.sleep(15)
                         continue
 
+                # IB's "S"-unit duration gets unreliable at whole-day scale
+                # (found 2026-09-04: a 15-min-bar, 86400 S request came back
+                # shifted ~2h early, identically, on fresh connections/clientIds
+                # — not the stale-cache bug this loop otherwise guards against,
+                # since there was no prior chunk to leak from). IB's own
+                # convention is "D" units for day-scale requests; only exact
+                # multiples of a day take that path; sub-day durations are the
+                # existing 1/5/10/15/30-second-bar chunks, untouched.
+                duration_str = f"{dur_secs // 86400} D" if dur_secs % 86400 == 0 else f"{dur_secs} S"
+
                 try:
                     _throttle()
                     candidate = ib.reqHistoricalData(
                         contract,
                         endDateTime=end_str,
-                        durationStr=f"{dur_secs} S",
+                        durationStr=duration_str,
                         barSizeSetting=_BAR_SIZE,
                         whatToShow=_WHAT,
                         useRTH=False,
@@ -626,11 +642,36 @@ def _fetch_day(session: "_IBSession", conn: sqlite3.Connection,
                 # more patience before giving up on it — a general outage
                 # shouldn't gap out an otherwise-fine day just to move faster
                 # past a known-bad tail chunk elsewhere.
-                is_tail_chunk = i >= total_chunks - 2
+                # total_chunks==1 (e.g. 15-min bars: whole session in one
+                # request) must never qualify — every day's only chunk would
+                # match "i >= total_chunks-2" and get the 1-crash leniency
+                # meant for a known end-of-session gap, silently accepting a
+                # transient failure as a zero-bar day instead of retrying it.
+                is_tail_chunk = total_chunks > 1 and i >= total_chunks - 2
                 max_crashes = _MAX_CHUNK_CRASHES if is_tail_chunk else max(_MAX_CHUNK_CRASHES, 3)
 
                 crash_key = f"{symbol}|{date_str}|{i}"
                 crash_count = _record_chunk_crash(crash_key)
+
+                # Single-request bar sizes (total_chunks == 1, e.g. 15-min
+                # bars — whole session in one call): the crash-and-let-the-
+                # watchdog-restart strategy below buys nothing here. The 6
+                # in-process attempts already reconnect with fresh client IDs,
+                # and the failure hit in practice — IB returning a holiday-
+                # adjacent multi-day "superset" window for the whole-day
+                # request — is 100% deterministic, so a fresh process gets the
+                # identical response. Crashing just spams tracebacks and, with
+                # no watchdog, kills the whole run. Skip the day cleanly
+                # instead: no progress row is written, so a later run retries.
+                if total_chunks == 1:
+                    log.error(
+                        "%s %s: whole-day request failed on %d attempts "
+                        "(IB stale/superset window, deterministic) — SKIPPING "
+                        "this day (not marked finished; a later run retries)",
+                        symbol, date_str, attempt)
+                    flush()
+                    return bars_written
+
                 if crash_count < max_crashes:
                     raise ConnectionError(
                         f"{fail_streak} consecutive failures, no valid response for {symbol} {date_str} "
