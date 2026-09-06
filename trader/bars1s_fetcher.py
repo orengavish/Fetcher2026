@@ -1038,6 +1038,10 @@ if __name__ == "__main__":
     parser.add_argument("--symbols", help="Comma-separated symbols, e.g. MES,MNQ (default: all 4)")
     parser.add_argument("--days",   type=int, default=252,
                         help="Trading days back from yesterday (default 252 ≈ 1 year)")
+    parser.add_argument("--dates",  default=None,
+                        help="Comma-separated YYYY-MM-DD list fetched FIRST, ahead of "
+                             "the --days backfill (which then resumes where it left off). "
+                             "Use for priority days; already-done days skip instantly.")
     parser.add_argument("--test",   metavar="DURATION",
                         help="Stop after this long: 10m | 30s | 1h")
     parser.add_argument("--pace-max", type=int, default=None,
@@ -1071,5 +1075,9 @@ if __name__ == "__main__":
     else:
         symbols = _SYMBOLS
     days = _working_days(args.days)
+    if args.dates:
+        pri = sorted({datetime.strptime(s.strip(), "%Y-%m-%d").date()
+                      for s in args.dates.split(",") if s.strip()}, reverse=True)
+        days = pri + [d for d in days if d not in pri]
 
     run(symbols, days)
