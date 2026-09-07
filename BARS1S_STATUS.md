@@ -1,5 +1,68 @@
 # bars1s_fetcher — Status & Restart Reference
-> Written: 2026-07-22 | Updated: 2026-08-17 ~18:38 UTC | Script: v1.6 | Watchdog v3.0 | State: all 3 stages (5s/1s/30s) healthy, weighted rotation working correctly
+> Written: 2026-07-22 | Updated: 2026-09-07 | Script: v1.6 (+15-min bar size, --dates, whole-day no-crash) | Watchdog v3.0 | State: watchdog stages (5s/1s/30s) healthy; MES 1s backfill + 15-min all-4-symbols backfill done ad-hoc
+
+## 0o. UPDATE 2026-09-07 — 15-min (900s) bar size added; MES 1s 270-day backfill + Geva priority days done; whole-day requests no longer crash
+
+Three commits: `f85fdd1` (15-min bar size + no-crash + D-units + is_tail_chunk
+guard), `56116aa` (`--dates`). All ad-hoc runs, **not** watchdog-managed —
+`bars_fetch_watchdog.py` still cycles only 5s/1s/30s.
+
+**1. New bar size `900` ("15 mins").** `_BAR_SECS_TABLE[900] = ("15 mins",
+86400)` — one whole-session chunk per day (`total_chunks == 1`). A day is
+~92 bars, trivial for a single request, and it sidesteps the multi-chunk
+resume-verification math in `_verify_chunks_done` (which counts rows as if
+1 row == 1 second — already wrong for 5/10/15/30-**second** bars, but those
+predate this note). Output: `data/bars900s/{SYM}_900s_{YYYYMMDD}.csv`, own
+progress DB / lock / crash file like every other size.
+
+**2. `durationStr` "D" units for exact-day requests.** `f"{dur_secs} S"` with
+`dur_secs == 86400` came back from IB shifted ~2 h early, *identically*, on
+fresh connections/clientIds (so **not** the stale-cache bug §0b/§0g guards
+against — there was no prior chunk to leak from). Switched to
+`f"{dur_secs // 86400} D"` when `dur_secs % 86400 == 0`; sub-day durations
+(all the existing bar sizes) are untouched. This fixed the common case.
+
+**3. `is_tail_chunk` now requires `total_chunks > 1`.** With one chunk/day the
+old `i >= total_chunks - 2` matched every day's only chunk, handing it the
+1-crash "permanent gap" leniency meant for the genuine end-of-session tail
+gap (§0j/§0k) — a transient failure would've been frozen as a 0-bar day.
+
+**4. Whole-day requests skip instead of crash.** For `total_chunks == 1`, once
+the 6 in-process attempts are spent, `_fetch_day` now logs and
+`return bars_written` (day left unfinished, a later run retries) instead of
+`raise ConnectionError`. The crash-and-let-the-watchdog-restart strategy
+buys nothing for a single-request bar size — the 6 attempts already
+reconnect with fresh clientIds, and the failure it actually hits is 100%
+deterministic (see 5). Multi-chunk (1s/5s/30s) behaviour is unchanged: they
+still crash-restart so a real outage doesn't silently gap a day.
+
+**5. Known 15-min gap — 6 holiday-adjacent days, all 4 symbols.**
+`2026-07-06, 2026-06-22, 2026-05-26, 2026-02-17, 2026-01-20, 2025-11-28` —
+each the first trading day after a 3-day holiday weekend, or abutting a
+short holiday week. IB deterministically returns a shifted multi-day
+"superset" window (e.g. for 07-06 it returns `07-02 22:00 .. 07-06 20:45`
+when asked for `[07-05 22:00, 07-06 22:00)`) — confirmed with dozens of
+retries across fresh connections, 100% reproducible. A real fix means
+fetching the wider window IB wants to serve and trimming to the target day
+locally; judged not worth it for 6/252 days. `2026-01-01` & `2025-12-25`
+are also empty — correct, full closures. `2025-10-09` (MNQ/M2K) was a
+one-off transient miss, re-fetched clean.
+
+**6. New `--dates YYYY-MM-DD,...` flag.** Prepends an explicit day list (most-
+recent-first, deduped) ahead of the `--days` backfill in the *same* process,
+so a priority set jumps the queue without a second concurrent instance (same
+bar size shares one lock/progress DB/output dir). Used to fetch 10 missing
+"no-trades Geva" MES 1s days (`2025-07-17 … 2025-09-29`); `2025-09-01`
+landed at 68,400 bars = the correct Labor-Day early-close session, not a gap.
+
+**7. MES 1s 270-day backfill complete.** `bars1s_fetcher.py --symbol MES
+--days 270` in a self-restarting loop, back to ~`2025-07-17`. Gaps:
+`2026-05-25` (Memorial Day early close, auto-skipped after 3 restarts) plus
+the usual per-day tail-hour gaps (§0k). One early lesson: a bare
+`until … ; do … ; done` loop with **no backoff** hot-restarted ~80 k times
+during an IB Gateway outage — added `sleep 30` between restarts.
+
+---
 
 ## 0n. UPDATE 2026-08-17 ~18:38 UTC — 5s stage found stuck idle since before the §0m outage (stale scheduler weight debt), reset and confirmed recovered
 

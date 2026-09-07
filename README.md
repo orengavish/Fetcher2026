@@ -37,8 +37,9 @@ auto-restart — caused a real 19-day outage. See `OPERATIONS.md` §4 before ins
 - `trader/fetcher.py` — IB historical data fetch (paper port 4002 only)
 - `data/fetch_progress.db` — single source of truth; restart any time, resumes from last position
 - `trader/bars_watchdog_supervisor.py` → `bars_fetch_watchdog.py` → `bars1s_fetcher.py` —
-  separate OHLCV bars pipeline (1s/5s/30s), independent of the above; status on port 5004
-  via `bars_status_server.py`. See `OPERATIONS.md` for the full map.
+  separate OHLCV bars pipeline (watchdog cycles 1s/5s/30s; `bars1s_fetcher.py` also
+  supports `--bar-secs 900` = 15-min, run ad-hoc), independent of the above; status on
+  port 5004 via `bars_status_server.py`. See `OPERATIONS.md` / `BARS1S_STATUS.md` for the full map.
 
 ## Config
 

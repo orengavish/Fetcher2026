@@ -16,11 +16,12 @@ fetch_watchdog.py  →  fetch_scheduler.py  →  fetcher.py  →  IB Gateway (po
                           C:\Projects\Galgo2026\june\trader\data\history\*.csv
 ```
 
-**B. OHLCV bars pipeline** (1s / 5s / 30s bars, independent output dir)
+**B. OHLCV bars pipeline** (watchdog cycles 1s / 5s / 30s; `bars1s_fetcher.py`
+also does `--bar-secs 900` = 15-min ad-hoc — separate output dir per size)
 ```
 bars_watchdog_supervisor.py → bars_fetch_watchdog.py → bars1s_fetcher.py → IB Gateway (port 4002)
                                                               ↓
-                                          C:\Projects\Fetcher2026\data\bars{1,5,30}s\*.csv
+                                  C:\Projects\Fetcher2026\data\bars{1,5,30}s\*.csv  (+ bars900s\ ad-hoc)
 ```
 
 Both pipelines have their own dashboards:
@@ -219,4 +220,5 @@ and identifying the mystery SYSTEM-session process precisely.
 | `bars1s_fetcher.py` (1s) | — | `data/bars1s_run.log` | `data/bars1s_fetcher.lock` |
 | `bars1s_fetcher.py --bar-secs 5` | — | `data/bars5s_run.log` | `data/bars5s_fetcher.lock` |
 | `bars1s_fetcher.py --bar-secs 30` | — | `data/bars30s_run.log` | `data/bars30s_fetcher.lock` |
+| `bars1s_fetcher.py --bar-secs 900` (15-min, ad-hoc) | — | console / `data/bars900s_*` | `data/bars900s_fetcher.lock` |
 | `bars_status_server.py` | 5004 | `data/bars_status_server.log` | — |

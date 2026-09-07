@@ -105,17 +105,20 @@ that doesn't depend on `%USERPROFILE%`).
 
 ---
 
-## Current State (as of 2026-08-17)
+## Current State (as of 2026-09-07)
 
 | Item | Status |
 |------|--------|
-| IB Gateway (port 4002) | Up — manually relaunched 2026-08-17 after being down since ~04:10 UTC (see caveat above) |
+| IB Gateway (port 4002) | Up |
 | `fetch_scheduler.py` | Running, live TRADES window active |
 | `dashboard.py --real` (5050) | Running |
 | Bars pipeline (`bars_watchdog_supervisor.py` → `bars_fetch_watchdog.py`) | Running — group `1s+30s` active, `5s` queued next |
 | `bars_status_server.py` (5004) | Running |
 | BID_ASK fetch | Off (`fetch_bid_ask: false` in `trader/config.yaml` as of last check — verify before assuming) |
 | galao.db | Empty — no `verified_trades` table, `fetch_priority.py` still can't cross-reference trade dates |
+| **MES 1s backfill** (270 trading days, → ~2025-07-17) | Complete. Ran ad-hoc via `bars1s_fetcher.py --symbol MES --days 270` in a self-restarting loop. Gaps: 2026-05-25 (Memorial Day early close) + normal per-day tail-hour gaps. |
+| **15-min (900s) bars — all 4 symbols, 252 days** | Complete (MES/MNQ/M2K/MYM, 252 files each). Empty days: 2026-01-01 & 2025-12-25 (real closures) + 6 holiday-adjacent IB-quirk gap days (see Next Steps / `BARS1S_STATUS.md`). Ad-hoc, **not** watchdog-managed. |
+| **Geva priority MES 1s days** | 10 previously-missing "no-trades Geva" days fetched via new `--dates` flag (2025-07-17…2025-09-29). All present; 2025-09-01 is 68,400 bars = correct Labor-Day early close. |
 
 **Incident 2026-08-17:** Whole pipeline (gateway, scheduler, dashboard, all
 three bars fetchers, status server) was down. Bars pipeline had been down
@@ -153,39 +156,43 @@ dated history and is the source of truth for that subsystem.
    for making `fetch_priority.py` useful.
 5. **Google Drive upload** — `google_drive.enabled: false`. Wire up if
    off-machine CSV backup is wanted.
-6. **MES 1s backfill to match Geva ground truth (2025-09-03 → 2026-09-03)** —
-   in progress via `bars1s_fetcher.py --symbol MES --days 270` (resumable,
-   skips days already on disk). Known permanent gap: 2026-05-25 (Memorial
-   Day early close) — chunks past 13:00 ET have no data, script auto-skips
-   the day after 3 restarts.
-7. **NEW (2026-09-04): MES 15-min bars, 1 year back** — running via
-   `bars1s_fetcher.py --bar-secs 900 --symbol MES --days 252`. Required two
-   fixes in `trader/bars1s_fetcher.py`:
-   - Added `900: ("15 mins", 86400)` to `_BAR_SECS_TABLE` (1 chunk/day —
-     deliberately whole-session chunks, since the resume-verification logic
-     assumes 1 row/sec and misfires for any bar size where that's false,
-     e.g. multi-chunk 5/10/15/30s bars).
-   - `is_tail_chunk` now requires `total_chunks > 1`: with 1 chunk/day, the
-     old `i >= total_chunks-2` matched every day's only chunk, so a
-     transient failure would've been silently accepted as a permanent
-     zero-bar gap after a single crash instead of retried.
-   - `durationStr` now uses `"D"` units (not `"S"`) for exact-multiple-of-day
-     requests — `"86400 S"` came back from IB shifted ~2h early,
-     identically, on fresh connections (not the known stale-cache bug,
-     which needs a prior chunk to leak from and this request had none).
-     Sub-day durations (existing 1/5/10/15/30-second bars) are unaffected.
+6. ~~**MES 1s backfill to match Geva ground truth**~~ — **DONE (2026-09-07)**.
+   270 trading days back to ~2025-07-17 via `bars1s_fetcher.py --symbol MES
+   --days 270`. Gaps: 2026-05-25 (Memorial Day early close, auto-skipped) +
+   the normal per-day tail-hour gaps. Plus the 10 "no-trades Geva" priority
+   days (2025-07-17…2025-09-29) fetched via the new `--dates` flag.
+7. ~~**MES 15-min bars, 1 year back**~~ — **DONE (2026-09-06)**, then extended
+   to all 4 symbols (MNQ/M2K/MYM). 252 files each. Changes made in
+   `trader/bars1s_fetcher.py` (all committed, `f85fdd1` + `56116aa`):
+   - `900: ("15 mins", 86400)` added to `_BAR_SECS_TABLE` — 1 whole-session
+     chunk/day, sidesteps the multi-chunk resume-verification math (assumes
+     1 row/sec).
+   - `is_tail_chunk` now requires `total_chunks > 1` (a 1-chunk day must not
+     get the 1-crash "permanent gap" leniency meant for end-of-session gaps).
+   - `durationStr` uses `"D"` units for exact-day requests (`"86400 S"` came
+     back from IB shifted ~2h early, deterministically). Sub-day bar sizes
+     unaffected.
+   - `total_chunks == 1`: after retries are exhausted, **skip the day cleanly
+     instead of `raise ConnectionError`** — the crash-and-restart path buys
+     nothing for a single-request bar size and the failure it hits is 100%
+     deterministic. Multi-chunk (1s/5s/30s) behaviour unchanged.
+   - New `--dates YYYY-MM-DD,...` flag: fetch a priority list first, then the
+     `--days` backfill resumes. Lets a priority set jump the queue without a
+     second concurrent process (same bar size shares one lock/progress DB).
 
-   **Result: 246/252 days fetched.** 2 days (2026-01-01, 2025-12-25) are
-   correctly empty — real full-closure holidays. **6 days are a known,
-   accepted gap** — 2026-07-06, 2026-06-22, 2026-05-26, 2026-02-17,
-   2026-01-20, 2025-11-28, every one either the trading day right after a
-   3-day holiday weekend or abutting a short holiday week. IB deterministically
-   returns a shifted multi-day window instead of the requested single day for
-   these exact dates — confirmed with 27 retries across fresh connections/
-   clientIds, 100% reproducible, not transient. Real fix would mean fetching
-   the wider window IB actually wants to serve and trimming to the target day
-   locally; decided not worth it for 6/252 days — left as a documented gap
-   rather than chased further.
+   **Known 15-min gap (all 4 symbols): 6 holiday-adjacent days** —
+   2026-07-06, 2026-06-22, 2026-05-26, 2026-02-17, 2026-01-20, 2025-11-28,
+   each the first trading day after a 3-day holiday weekend or abutting a
+   short holiday week. IB deterministically returns a shifted multi-day
+   window instead of the requested single day (100% reproducible across
+   dozens of retries / fresh connections). A real fix means fetching the
+   wider window IB wants to serve and trimming locally — decided not worth
+   it for 6/252 days. `2026-01-01` & `2025-12-25` are also empty but that's
+   correct (full closures). A one-off transient miss on `2025-10-09`
+   (MNQ/M2K) was re-fetched successfully.
+8. **15-min pipeline is ad-hoc, not watchdog-managed.** `bars_fetch_watchdog.py`
+   still cycles only 1s/5s/30s. If 15-min should be kept current, add `900`
+   to the watchdog's stage set + weights.
 
 ---
 
@@ -201,6 +208,16 @@ dated history and is the source of truth for that subsystem.
 - **Lock files:** If a fetcher/scheduler crashes hard, its `data/*.lock` file
   stays and the next run refuses to start. The various watchdogs clean stale
   locks automatically (dead PID check) — a manual run doesn't, delete by hand.
+- **One fetcher per bar size:** each `--bar-secs` value has its own
+  lock/progress DB/output dir, so 1s + 5s + 15-min can run at once, but two
+  instances of the *same* bar size cannot — the second exits on the lock.
+  To prioritise specific days within a bar size, use `--dates` (runs them
+  ahead of the `--days` backfill in one process), not a second process.
+- **Whole-day-chunk bar sizes (900s / 15-min):** one request covers the whole
+  session (`total_chunks == 1`). Holiday-adjacent days deterministically get a
+  bad multi-day window from IB and are skipped, not fetched — a *later* run
+  re-attempts them (they never get marked finished), so a bare restart loop
+  will re-try-and-skip them every pass (~90s each). Expected, not a bug.
 - **Shared lib path:** `sys.path.insert(0, _ROOT)` at top of every module. If
   root changes, all imports break silently.
 - **galao.db path is wrong, not just fragile:** `paths.db` points at a dead
