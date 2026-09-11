@@ -4,18 +4,21 @@
 
 $ProjectRoot = "C:\Projects\Fetcher2026"
 $Python      = (Get-Command python -ErrorAction Stop).Source
+$PythonW     = Join-Path (Split-Path $Python) "pythonw.exe"
 
 # --- Task 1: Watchdog (every 5 min, restarts fetch_scheduler if it dies) ---
 # Principal must be the interactive user, not SYSTEM: SYSTEM can't resolve
 # %USERPROFILE%-relative IBC\config.ini, which caused a real 19-day silent outage.
-$A1 = New-ScheduledTaskAction -Execute $Python `
+# pythonw (not python) so the watchdog itself has no console window; it already
+# logs everything to logs/fetch_watchdog.log via lib.logger.
+$A1 = New-ScheduledTaskAction -Execute $PythonW `
         -Argument "`"$ProjectRoot\trader\fetch_watchdog.py`"" `
         -WorkingDirectory $ProjectRoot
-# fetch_watchdog.py is meant to run forever (self-checks hourly). The 5-min trigger +
-# IgnoreNew is a keep-alive: relaunch only if it actually died. ExecutionTimeLimit 0 =
-# "do not stop" -- a 4-min limit here killed the healthy watchdog every 4 min, so Task
-# Scheduler spawned a fresh one (new console window) every 5 min instead.
-$T1 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+# fetch_watchdog.py is meant to run forever (self-checks hourly). The hourly trigger +
+# IgnoreNew is a keep-alive: relaunch only if it actually died (up to 1h to notice).
+# ExecutionTimeLimit 0 = "do not stop" -- a 4-min limit here killed the healthy watchdog
+# every 4 min, so Task Scheduler spawned a fresh one (new console window) every 5 min.
+$T1 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650)
 $S1 = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 0) `
@@ -26,7 +29,7 @@ $P1 = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonT
 try {
     Register-ScheduledTask -TaskName "GalgoFetcher2026" `
         -Action $A1 -Trigger $T1 -Settings $S1 -Principal $P1 -Force -ErrorAction Stop | Out-Null
-    Write-Host "OK: GalgoFetcher2026 (watchdog every 5 min)"
+    Write-Host "OK: GalgoFetcher2026 (watchdog, windowless, checked hourly)"
 } catch {
     Write-Host "FAILED: GalgoFetcher2026 -- $_"
 }

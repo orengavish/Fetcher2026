@@ -1,5 +1,19 @@
 """
 trader/gateway_watchdog.py
+
+DEPRECATED (2026-08-24) -- superseded by trader/fetch_watchdog.py, which is the
+GalgoFetcher2026 scheduled task and already does everything this module does
+(port 4002 health check + IBC restart + scheduler liveness). Running both would
+recreate the exact "two independent, uncoordinated restart authorities for the
+same shared resource" problem identified in ARCHITECTURE_RESPONSE.md -- almost
+certainly the actual identity of the never-fully-identified "rogue watchdog"
+incident (plan.md bug 2). Confirmed not currently launched by anything
+(no scheduled task, no startup-folder entry, scripts/run_watchdog.bat referenced
+below doesn't exist) -- kept here for reference/history only. Do not schedule
+or launch this; use fetch_watchdog.py instead.
+
+--- original docstring below, retained for history ---
+
 Keeps IB Gateway AND fetch_scheduler running 24/7.
 
 Gateway monitoring:
@@ -175,6 +189,13 @@ if __name__ == "__main__":
     parser.add_argument("--interval", type=int, default=_POLL_INTERVAL,
                         help=f"Poll interval in seconds (default {_POLL_INTERVAL})")
     args = parser.parse_args()
+
+    log.warning(
+        "gateway_watchdog.py is DEPRECATED -- fetch_watchdog.py (the GalgoFetcher2026 "
+        "scheduled task) already owns Gateway restart. Running both risks a repeat of "
+        "the uncoordinated-restart incident behind plan.md bug 2. Continuing anyway "
+        "since this was launched explicitly, but consider using fetch_watchdog.py instead."
+    )
 
     cfg = get_config()
     if args.once:

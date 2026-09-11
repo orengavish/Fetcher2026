@@ -21,12 +21,18 @@ symbols:
 
 fetcher:
   auto_fetch_enabled: true
-  fetch_bid_ask: false
-  backfill_bid_ask: false
+  fetch_bid_ask: true
+  backfill_bid_ask: true
   fetch_live_trades: true
   live_window_hours: 23.5
   live_refresh_minutes: 60
-  backfill_days: 180
+  # was 180; bounded to 120 (2026-08-24 -- reaches back to ~2026-04-26, close to
+  # the 2026-04-23 start of armed critical_lines coverage) so re-enabling
+  # backfill_bid_ask doesn't trigger an unbounded ~144GB fetch -- days before
+  # armed-lines coverage can't become CL Algo "ready days" regardless of BID_ASK,
+  # so backfilling that far back for this purpose has no payoff. See plan.md's
+  # BID_ASK open decision and the 2026-08-24 backtest finding that motivated this.
+  backfill_days: 120
   fetch_on_startup: true
   symbols_override:
     - MES

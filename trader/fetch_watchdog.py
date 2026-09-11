@@ -1,6 +1,6 @@
 """
 trader/fetch_watchdog.py
-Watchdog for the Galgo fetch system. Runs every 60 seconds and:
+Watchdog for the Galgo fetch system. Runs every hour and:
   1. Checks IB Gateway health (port 4002) — restarts IBC if down
   2. Checks fetch_scheduler process — restarts if dead (and gateway is up)
   3. Checks fetch_progress freshness — emails if stale with no scheduler
@@ -36,15 +36,22 @@ log = get_logger("fetch_watchdog")
 _LOCK_FILE    = _ROOT / "data" / "fetch_scheduler.lock"
 _PROGRESS_DB  = _ROOT / "data" / "fetch_progress.db"
 _SCHEDULER    = _ROOT / "trader" / "fetch_scheduler.py"
-_EMAIL_SCRIPT = _ROOT.parent / "send_email.py"
+_EMAIL_SCRIPT = _ROOT / "send_email.py"
 _EMAIL_TO     = "gavish.oren@gmail.com"
 
-CHECK_INTERVAL   = 60    # seconds between checks
+CHECK_INTERVAL   = 3600  # seconds between checks
 STALE_THRESHOLD  = 300   # seconds with no DB update = fetch is stuck
 RESTART_COOLDOWN = 180   # seconds to wait before restarting scheduler again
 
 _last_restart_ts: float = 0.0
 _consecutive_failures: int = 0
+
+# Restarted processes get their own console (needed since this watchdog may
+# itself be closed independently) but start minimized so they don't steal
+# focus from whatever the user is doing.
+_MINIMIZED_STARTUPINFO = subprocess.STARTUPINFO()
+_MINIMIZED_STARTUPINFO.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+_MINIMIZED_STARTUPINFO.wShowWindow = 7  # SW_SHOWMINNOACTIVE
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -63,11 +70,14 @@ def _send_email(subject: str, body: str):
         log.warning("Email script not found: %s", _EMAIL_SCRIPT)
         return
     try:
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, str(_EMAIL_SCRIPT), subject, body],
-            check=False, timeout=30
+            check=False, timeout=30, capture_output=True, text=True
         )
-        log.info("Email sent: %s", subject)
+        if result.returncode == 0:
+            log.info("Email sent: %s", subject)
+        else:
+            log.warning("Email failed (exit %d): %s", result.returncode, result.stderr.strip())
     except Exception as e:
         log.warning("Email failed: %s", e)
 
@@ -158,6 +168,7 @@ def _restart_gateway(cfg) -> bool:
     subprocess.Popen(
         ["cmd", "/c", str(ibc_bat)],
         creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=_MINIMIZED_STARTUPINFO,
     )
 
     gw_host = getattr(cfg.ib, "live_host", "127.0.0.1")
@@ -183,6 +194,7 @@ def _restart_scheduler() -> bool:
             [sys.executable, str(_SCHEDULER), "--backfill"],
             cwd=str(_ROOT),
             creationflags=subprocess.CREATE_NEW_CONSOLE,
+            startupinfo=_MINIMIZED_STARTUPINFO,
         )
         _last_restart_ts = now
         log.info("Restarted fetch_scheduler")
